@@ -1,0 +1,73 @@
+:root {
+  --app-font:
+    -apple-system,
+    BlinkMacSystemFont,
+    'SF Pro Text',
+    'SF Pro Display',
+    '.SF NS Text',
+    '.SF NS Display',
+    'Inter Variable',
+    'Helvetica Neue',
+    'Segoe UI Variable Text',
+    'Segoe UI',
+    sans-serif;
+  font-family:
+    var(--app-font);
+  line-height: 1.45;
+  font-weight: 400;
+  color: #d8dee8;
+  background: #111318;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+  font-family: var(--app-font);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #111318;
+}
+
+body[data-overlay-mode='true'] {
+  background: transparent;
+  overflow: hidden;
+}
+
+html[data-overlay-mode='true'],
+html[data-overlay-mode='true'] body,
+html[data-overlay-mode='true'] #root {
+  background: transparent !important;
+}
+
+html[data-overlay-mode='true'] #root {
+  min-height: 100vh;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+#root {
+  min-height: 100vh;
+}
