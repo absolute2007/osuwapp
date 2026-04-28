@@ -1,4 +1,5 @@
 .window-shell {
+  position: relative;
   height: 100vh;
   min-height: 0;
   display: grid;
@@ -8,6 +9,40 @@
   color: #2a2f38;
   border: 1px solid rgba(203, 198, 189, 0.95);
   overflow: hidden;
+}
+
+.window-shell--intro > :not(.app-intro) {
+  animation: app-content-intro 2450ms cubic-bezier(0.2, 0.82, 0.24, 1) both;
+}
+
+.app-intro {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  pointer-events: none;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at center, rgba(58, 68, 86, 0.28), transparent 34%),
+    #111318;
+  animation: app-intro-release 2450ms cubic-bezier(0.2, 0.82, 0.24, 1) both;
+}
+
+.app-intro__mark {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  width: 22px;
+  height: 22px;
+  filter: drop-shadow(0 18px 34px rgba(240, 87, 147, 0.42));
+  transform-origin: center;
+  animation: app-intro-logo 2450ms cubic-bezier(0.2, 0.82, 0.24, 1) both;
+}
+
+.app-intro__mark img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .titlebar {
@@ -46,10 +81,11 @@
   flex: none;
 }
 
-.titlebar__badge svg {
+.titlebar__badge img {
   display: block;
   width: 100%;
   height: 100%;
+  object-fit: contain;
 }
 
 .titlebar__brand-copy {
@@ -845,28 +881,6 @@
   border-bottom: 0;
 }
 
-.overlay-settings-preview {
-  overflow: hidden;
-}
-
-.overlay-settings-preview__stage {
-  min-height: 300px;
-  padding: 18px;
-  display: grid;
-  align-items: start;
-  justify-items: start;
-  overflow: auto;
-  background:
-    linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px),
-    #111722;
-  background-size: 24px 24px;
-}
-
-.overlay-settings-preview__stage .overlay-card--hud {
-  min-height: 0;
-}
-
 .settings-row--stacked {
   display: grid;
   align-items: start;
@@ -1322,12 +1336,12 @@
 
 .overlay-card__stats {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(max-content, 1fr));
   gap: 0.375em;
 }
 
 .overlay-card__stats--hud {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(max-content, 1fr));
 }
 
 .overlay-card__stats div {
@@ -1343,6 +1357,7 @@
   display: block;
   font-size: 0.63em;
   color: #90a0b8;
+  white-space: nowrap;
 }
 
 .overlay-card__stats strong {
@@ -1350,6 +1365,7 @@
   font-size: 0.86em;
   font-weight: 600;
   color: #f4f7fb;
+  white-space: nowrap;
 }
 
 .overlay-card__map,
@@ -1377,7 +1393,7 @@
 
 .overlay-hit-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(max-content, 1fr));
   gap: 0.32em;
 }
 
@@ -1396,12 +1412,14 @@
   font-weight: 700;
   letter-spacing: 0.02em;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .overlay-hit strong {
   display: block;
   font-size: 0.88em;
   color: #f7fbff;
+  white-space: nowrap;
 }
 
 .overlay-hit--blue {
@@ -1714,6 +1732,57 @@
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes app-content-intro {
+  0%,
+  56% {
+    filter: blur(14px);
+    opacity: 0.72;
+    transform: scale(1.012);
+  }
+
+  100% {
+    filter: blur(0);
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes app-intro-logo {
+  0% {
+    opacity: 0;
+    transform: translate(calc(50vw - 23px), calc(50vh - 21px)) scale(3.7);
+  }
+
+  18% {
+    opacity: 1;
+    transform: translate(calc(50vw - 23px), calc(50vh - 21px)) scale(5.15);
+  }
+
+  38% {
+    opacity: 1;
+    transform: translate(calc(50vw - 23px), calc(50vh - 21px)) scale(4.85);
+  }
+
+  76%,
+  100% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+}
+
+@keyframes app-intro-release {
+  0%,
+  72% {
+    opacity: 1;
+    backdrop-filter: blur(0);
+  }
+
+  100% {
+    opacity: 0;
+    backdrop-filter: blur(10px);
   }
 }
 

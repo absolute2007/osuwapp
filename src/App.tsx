@@ -12,6 +12,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import '@fontsource-variable/inter/index.css'
+import appIconUrl from './assets/app-icon.png'
 import './App.css'
 import { initialSnapshot } from './mockSnapshot'
 import type {
@@ -526,7 +527,7 @@ function App() {
   }
 
   return (
-    <div className="window-shell">
+    <div className="window-shell window-shell--intro">
       <header className="titlebar">
         <div
           className="titlebar__drag"
@@ -536,7 +537,7 @@ function App() {
         >
           <div className="titlebar__brand">
             <div className="titlebar__badge" aria-hidden="true">
-              <OsuLogo />
+              <AppIcon />
             </div>
             <div className="titlebar__brand-copy">
               <strong>osu! Companion</strong>
@@ -684,6 +685,12 @@ function App() {
         <span>{viewModel.recentPlays.length} saved plays</span>
         <span>{session?.pp.calculator ?? 'rosu-pp 4.0.1'}</span>
       </footer>
+
+      <div className="app-intro" aria-hidden="true">
+        <div className="app-intro__mark">
+          <AppIcon />
+        </div>
+      </div>
     </div>
   )
 }
@@ -806,31 +813,8 @@ function OverlayHudCard({
   )
 }
 
-function OsuLogo() {
-  return (
-    <svg viewBox="0 0 64 64" fill="none" aria-hidden="true">
-      <circle cx="32" cy="32" r="32" fill="url(#osu-pink)" />
-      <circle cx="32" cy="32" r="22.5" stroke="rgba(255,255,255,0.95)" strokeWidth="5" />
-      <circle cx="32" cy="32" r="26.75" stroke="rgba(255,255,255,0.18)" strokeWidth="1.5" />
-      <text
-        x="32"
-        y="39"
-        fill="#ffffff"
-        fontFamily="-apple-system,BlinkMacSystemFont,'SF Pro Text','SF Pro Display','Helvetica Neue',sans-serif"
-        fontSize="17"
-        fontWeight="700"
-        textAnchor="middle"
-      >
-        osu!
-      </text>
-      <defs>
-        <linearGradient id="osu-pink" x1="32" x2="32" y1="0" y2="64" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#FF7DB2" />
-          <stop offset="1" stopColor="#F05793" />
-        </linearGradient>
-      </defs>
-    </svg>
-  )
+function AppIcon() {
+  return <img alt="" src={appIconUrl} />
 }
 
 function SessionView({
@@ -1314,33 +1298,6 @@ function OverlayView({
       <header className="page-header">
         <h1>Overlay</h1>
       </header>
-
-      <section className="panel overlay-settings-preview">
-        <div className="panel__title">
-          <span>Preview</span>
-          <span className="settings-value">{settings.width} x {settings.height}</span>
-        </div>
-        <div
-          className="overlay-settings-preview__stage"
-          style={
-            {
-              '--overlay-width': `${settings.width}px`,
-              '--overlay-height': `${settings.height}px`,
-              '--overlay-scale': settings.scale.toString(),
-              '--overlay-font-scale': settings.fontScale.toString(),
-              '--overlay-padding': `${settings.padding}px`,
-              '--overlay-radius': `${settings.cornerRadius}px`,
-              '--overlay-opacity': settings.opacity.toString(),
-            } as CSSProperties
-          }
-        >
-          <OverlayHudCard
-            className="overlay-card overlay-card--hud"
-            session={session}
-            settings={settings}
-          />
-        </div>
-      </section>
 
       <section className="panel panel--stacked">
         <div className="settings-row">
