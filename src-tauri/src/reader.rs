@@ -1,14 +1,22 @@
 use std::{
     collections::HashMap,
+    fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
     time::Duration,
 };
 
-use rosu_map::Beatmap as ParsedBeatmap;
+use rosu_map::{section::hit_objects::HitObjectKind, Beatmap as ParsedBeatmap};
+use rosu_mem::process::ProcessTraits;
 use rosu_memory_lib::reader::{
-    beatmap::BeatmapReader,
+    beatmap::{
+        common::{
+            BeatmapInfo, BeatmapLocation, BeatmapMetadata, BeatmapStats, BeatmapStatus,
+            BeatmapTechnicalInfo,
+        },
+        BeatmapReader,
+    },
     common::{CommonReader, GameMode, GameState, OsuClientKind},
     gameplay::GameplayReader,
     resultscreen::ResultScreenReader,
@@ -34,6 +42,7 @@ use crate::{
 const SNAPSHOT_EVENT: &str = "session-updated";
 const POLL_INTERVAL_MS: u64 = 90;
 const INIT_RETRY_MS: u64 = 100;
+const BEATMAP_PTR_OFFSET: i32 = 0xC;
 
 pub fn spawn_live_reader(app: AppHandle, latest_snapshot: Arc<Mutex<Option<AppSnapshot>>>) {
     thread::spawn(move || {
@@ -64,6 +73,7 @@ pub fn spawn_live_reader(app: AppHandle, latest_snapshot: Arc<Mutex<Option<AppSn
             let mut cache = BeatmapCache::default();
             let mut last_result_signature: Option<String> = None;
             let mut last_gameplay_mods: Option<u32> = None;
+            let mut last_known_session: Option<SessionSnapshot> = None;
             let mut gameplay_tracker = GameplayTracker::default();
 
             loop {
@@ -73,6 +83,7 @@ pub fn spawn_live_reader(app: AppHandle, latest_snapshot: Arc<Mutex<Option<AppSn
                     &mut cache,
                     &recent_plays,
                     &mut last_gameplay_mods,
+                    &mut last_known_session,
                     &mut gameplay_tracker,
                 ) {
                     Ok(mut snapshot) => {
@@ -148,6 +159,7 @@ impl GameplayTracker {
         combo: u32,
         misses: u32,
         passed_objects: u32,
+        map_max_combo: u32,
     ) -> u32 {
         let map_changed = self
             .beatmap_path
@@ -167,12 +179,13 @@ impl GameplayTracker {
         }
 
         if mode == GameMode::Osu
-            && passed_objects > self.previous_passed_objects
             && misses == self.previous_misses
             && self.previous_combo > 0
-            && combo + 1 < self.previous_combo
+            && combo < self.previous_combo
         {
-            self.slider_breaks = self.slider_breaks.saturating_add(1);
+            if self.previous_combo < map_max_combo {
+                self.slider_breaks = self.slider_breaks.saturating_add(1);
+            }
         }
 
         self.retries = retries;
@@ -206,8 +219,13 @@ impl BeatmapCache {
             .and_then(|point| (point.beat_len > 0.0).then_some(60_000.0 / point.beat_len));
 
         let cover_path = path.parent().and_then(|parent| {
-            (!cover_filename.is_empty())
-                .then_some(parent.join(cover_filename))
+            let parsed_cover = (!parsed_map.background_file.is_empty())
+                .then_some(parsed_map.background_file.as_str())
+                .or_else(|| (!cover_filename.is_empty()).then_some(cover_filename));
+
+            parsed_cover
+                .map(|filename| parent.join(filename))
+                .filter(|cover| cover.exists())
                 .map(|p| p.display().to_string())
         });
 
@@ -258,6 +276,7 @@ fn build_snapshot(
     cache: &mut BeatmapCache,
     recent_plays: &[RecentPlaySnapshot],
     last_gameplay_mods: &mut Option<u32>,
+    last_known_session: &mut Option<SessionSnapshot>,
     gameplay_tracker: &mut GameplayTracker,
 ) -> Result<AppSnapshot, String> {
     let game_state = CommonReader::new(process, state, OsuClientKind::Stable)
@@ -265,8 +284,10 @@ fn build_snapshot(
         .map_err(|error| error.to_string())?;
 
     let Some(phase) = phase_for_game_state(game_state) else {
-        if game_state == GameState::MainMenu {
-            if let Ok((beatmap_info, beatmap_path)) = read_beatmap_context(process, state) {
+        if matches!(game_state, GameState::MainMenu | GameState::Editor) {
+            if let Ok((beatmap_info, beatmap_path)) =
+                read_beatmap_context(process, state, game_state)
+            {
                 if beatmap_path.exists() {
                     let session = build_preview_session(
                         process,
@@ -280,7 +301,10 @@ fn build_snapshot(
                     return Ok(AppSnapshot {
                         connection: ConnectionSnapshot {
                             status: ConnectionStatus::Connected,
-                            detail: "Connected to osu!.exe · selected beatmap".to_string(),
+                            detail: format!(
+                                "Connected to osu!.exe · stable reader · {}",
+                                format_game_state(game_state)
+                            ),
                             updated_at_ms: mock::now_ms(),
                         },
                         session: Some(session),
@@ -293,7 +317,40 @@ fn build_snapshot(
         return Ok(connected_idle_snapshot(game_state, recent_plays));
     };
 
-    let (beatmap_info, beatmap_path) = read_beatmap_context(process, state)?;
+    let (beatmap_info, beatmap_path) = match read_beatmap_context(process, state, game_state) {
+        Ok(context) => context,
+        Err(error) => {
+            if matches!(game_state, GameState::MainMenu | GameState::Editor) {
+                if let Some(mut session) = last_known_session.clone() {
+                    session.phase = SessionPhase::Preview;
+                    session.live.game_state = format_game_state(game_state);
+                    session.live.accuracy = None;
+                    session.live.combo = 0;
+                    session.live.score = 0;
+                    session.live.hp = None;
+                    session.live.progress = 0.0;
+                    session.live.hits = empty_hits();
+                    session.pp.current = session.pp.full_map;
+                    session.pp.if_fc = session.pp.full_map;
+
+                    return Ok(AppSnapshot {
+                        connection: ConnectionSnapshot {
+                            status: ConnectionStatus::Connected,
+                            detail: format!(
+                                "Connected to osu!.exe · stable reader · {}",
+                                format_game_state(game_state)
+                            ),
+                            updated_at_ms: mock::now_ms(),
+                        },
+                        session: Some(session),
+                        recent_plays: recent_plays.to_vec(),
+                    });
+                }
+            }
+
+            return Err(error);
+        }
+    };
 
     let session = match phase {
         SessionPhase::Preview => build_preview_session(
@@ -329,6 +386,8 @@ fn build_snapshot(
     if phase == SessionPhase::Preview {
         gameplay_tracker.reset();
     }
+
+    *last_known_session = Some(session.clone());
 
     Ok(AppSnapshot {
         connection: ConnectionSnapshot {
@@ -529,9 +588,11 @@ fn format_mods(bits: u32) -> String {
 
 fn phase_for_game_state(state: GameState) -> Option<SessionPhase> {
     match state {
-        GameState::SongSelect | GameState::EditorSongSelect | GameState::MultiplayerSongSelect => {
-            Some(SessionPhase::Preview)
-        }
+        GameState::MainMenu
+        | GameState::Editor
+        | GameState::SongSelect
+        | GameState::EditorSongSelect
+        | GameState::MultiplayerSongSelect => Some(SessionPhase::Preview),
         GameState::Playing => Some(SessionPhase::Playing),
         GameState::ResultScreen
         | GameState::MultiplayerResultScreen
@@ -546,10 +607,10 @@ fn connected_idle_snapshot(
     recent_plays: &[RecentPlaySnapshot],
 ) -> AppSnapshot {
     let detail = if game_state == GameState::MainMenu {
-        "osu! detected. Select a beatmap or start a map to see PP.".to_string()
+        "osu! detected. Waiting for selected beatmap data.".to_string()
     } else {
         format!(
-            "osu! detected. {} is open; select a beatmap or start a map to see PP.",
+            "osu! detected. {} is open; waiting for selected beatmap data.",
             format_game_state(game_state)
         )
     };
@@ -568,20 +629,275 @@ fn connected_idle_snapshot(
 fn read_beatmap_context(
     process: &rosu_mem::process::Process,
     state: &mut State,
-) -> Result<
-    (
-        rosu_memory_lib::reader::beatmap::common::BeatmapInfo,
-        PathBuf,
-    ),
-    String,
-> {
+    game_state: GameState,
+) -> Result<(BeatmapInfo, PathBuf), String> {
+    if game_state == GameState::MainMenu {
+        if let Ok(context) = read_menu_beatmap_context(process, state) {
+            return Ok(context);
+        }
+    }
+
     let mut beatmap_reader = BeatmapReader::new(process, state, OsuClientKind::Stable)
         .map_err(|error| error.to_string())?;
 
     let beatmap_info = beatmap_reader.info().map_err(|error| error.to_string())?;
+    drop(beatmap_reader);
+
+    if game_state == GameState::MainMenu {
+        if let Some(context) = read_main_menu_audio_context(process, state, &beatmap_info) {
+            return Ok(context);
+        }
+    }
+
+    let mut beatmap_reader = BeatmapReader::new(process, state, OsuClientKind::Stable)
+        .map_err(|error| error.to_string())?;
     let beatmap_path = beatmap_reader.path().map_err(|error| error.to_string())?;
 
     Ok((beatmap_info, beatmap_path))
+}
+
+fn read_menu_beatmap_context(
+    process: &rosu_mem::process::Process,
+    state: &mut State,
+) -> Result<(BeatmapInfo, PathBuf), String> {
+    let beatmap_addr = process
+        .read_i32(state.addresses.base - BEATMAP_PTR_OFFSET)
+        .and_then(|ptr| process.read_i32(ptr))
+        .map_err(|error| error.to_string())?;
+
+    if beatmap_addr == 0 {
+        return Err("Main menu beatmap pointer is empty".to_string());
+    }
+
+    let metadata = BeatmapMetadata {
+        author: process
+            .read_string(beatmap_addr + 0x18)
+            .map_err(|error| error.to_string())?,
+        creator: process
+            .read_string(beatmap_addr + 0x7c)
+            .map_err(|error| error.to_string())?,
+        title_romanized: process
+            .read_string(beatmap_addr + 0x24)
+            .map_err(|error| error.to_string())?,
+        title_original: process
+            .read_string(beatmap_addr + 0x28)
+            .map_err(|error| error.to_string())?,
+        difficulty: process
+            .read_string(beatmap_addr + 0xac)
+            .map_err(|error| error.to_string())?,
+        tags: process
+            .read_string(beatmap_addr + 0x20)
+            .map_err(|error| error.to_string())?,
+    };
+
+    let location = BeatmapLocation {
+        folder: process
+            .read_string(beatmap_addr + 0x78)
+            .map_err(|error| error.to_string())?,
+        filename: process
+            .read_string(beatmap_addr + 0x90)
+            .map_err(|error| error.to_string())?,
+        audio: process
+            .read_string(beatmap_addr + 0x64)
+            .map_err(|error| error.to_string())?,
+        cover: process
+            .read_string(beatmap_addr + 0x68)
+            .map_err(|error| error.to_string())?,
+    };
+
+    if !location.filename.ends_with(".osu") {
+        return Err("Main menu beatmap filename is not ready".to_string());
+    }
+
+    let stats = BeatmapStats {
+        ar: process
+            .read_f32(beatmap_addr + 0x2c)
+            .map_err(|error| error.to_string())?,
+        cs: process
+            .read_f32(beatmap_addr + 0x30)
+            .map_err(|error| error.to_string())?,
+        hp: process
+            .read_f32(beatmap_addr + 0x34)
+            .map_err(|error| error.to_string())?,
+        od: process
+            .read_f32(beatmap_addr + 0x38)
+            .map_err(|error| error.to_string())?,
+        length: process
+            .read_i32(beatmap_addr + 0x134)
+            .map_err(|error| error.to_string())?,
+        star_rating: rosu_memory_lib::reader::beatmap::common::BeatmapStarRating {
+            no_mod: 0.0,
+            dt: 0.0,
+            ht: 0.0,
+        },
+        object_count: process
+            .read_i32(beatmap_addr + 0xf8)
+            .map_err(|error| error.to_string())?,
+        slider_count: process
+            .read_i32(beatmap_addr + 0x146)
+            .map_err(|error| error.to_string())?,
+    };
+
+    let technical = BeatmapTechnicalInfo {
+        md5: process
+            .read_string(beatmap_addr + 0x6c)
+            .map_err(|error| error.to_string())?,
+        id: process
+            .read_i32(beatmap_addr + 0xc8)
+            .map_err(|error| error.to_string())?,
+        set_id: process
+            .read_i32(beatmap_addr + 0xcc)
+            .map_err(|error| error.to_string())?,
+        mode: GameMode::from(
+            process
+                .read_i32(beatmap_addr + 0x11c)
+                .map_err(|error| error.to_string())?,
+        ),
+        ranked_status: BeatmapStatus::from(
+            process
+                .read_i32(beatmap_addr + 0x12c)
+                .map_err(|error| error.to_string())?,
+        ),
+    };
+
+    let songs_path = CommonReader::new(process, state, OsuClientKind::Stable)
+        .path_folder()
+        .map_err(|error| error.to_string())?;
+    let beatmap_path = songs_path.join(&location.folder).join(&location.filename);
+
+    Ok((
+        BeatmapInfo {
+            metadata,
+            location,
+            stats,
+            technical,
+        },
+        beatmap_path,
+    ))
+}
+
+fn read_main_menu_audio_context(
+    process: &rosu_mem::process::Process,
+    state: &mut State,
+    memory_info: &BeatmapInfo,
+) -> Option<(BeatmapInfo, PathBuf)> {
+    let folder = memory_info.location.folder.trim();
+    let audio = memory_info.location.audio.trim();
+
+    if folder.is_empty() || audio.is_empty() {
+        return None;
+    }
+
+    let songs_path = CommonReader::new(process, state, OsuClientKind::Stable)
+        .path_folder()
+        .ok()?;
+    let beatmap_dir = songs_path.join(folder);
+
+    let mut best: Option<(BeatmapInfo, PathBuf)> = None;
+
+    for entry in fs::read_dir(&beatmap_dir).ok()?.flatten() {
+        let path = entry.path();
+
+        if path.extension().and_then(|extension| extension.to_str()) != Some("osu") {
+            continue;
+        }
+
+        let Ok(parsed) = ParsedBeatmap::from_path(&path) else {
+            continue;
+        };
+
+        if !parsed.audio_file.eq_ignore_ascii_case(audio) {
+            continue;
+        }
+
+        let info = build_file_beatmap_info(
+            &path,
+            &beatmap_dir,
+            parsed,
+            memory_info.technical.ranked_status,
+            memory_info.technical.md5.clone(),
+        );
+
+        if best
+            .as_ref()
+            .is_none_or(|(current, _)| current.technical.id <= 0 && info.technical.id > 0)
+        {
+            best = Some((info, path));
+        }
+    }
+
+    best
+}
+
+fn build_file_beatmap_info(
+    path: &Path,
+    beatmap_dir: &Path,
+    parsed: ParsedBeatmap,
+    ranked_status: BeatmapStatus,
+    md5: String,
+) -> BeatmapInfo {
+    let mode = match parsed.mode {
+        rosu_map::section::general::GameMode::Osu => GameMode::Osu,
+        rosu_map::section::general::GameMode::Taiko => GameMode::Taiko,
+        rosu_map::section::general::GameMode::Catch => GameMode::Catch,
+        rosu_map::section::general::GameMode::Mania => GameMode::Mania,
+    };
+    let length = parsed
+        .hit_objects
+        .last()
+        .map(|object| object.start_time as i32)
+        .unwrap_or_default();
+    let slider_count = parsed
+        .hit_objects
+        .iter()
+        .filter(|object| matches!(object.kind, HitObjectKind::Slider(_)))
+        .count() as i32;
+
+    BeatmapInfo {
+        metadata: BeatmapMetadata {
+            author: parsed.artist,
+            creator: parsed.creator,
+            title_romanized: parsed.title,
+            title_original: parsed.title_unicode,
+            difficulty: parsed.version,
+            tags: parsed.tags,
+        },
+        location: BeatmapLocation {
+            folder: beatmap_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string(),
+            filename: path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string(),
+            audio: parsed.audio_file,
+            cover: parsed.background_file,
+        },
+        stats: BeatmapStats {
+            ar: parsed.approach_rate,
+            od: parsed.overall_difficulty,
+            cs: parsed.circle_size,
+            hp: parsed.hp_drain_rate,
+            length,
+            star_rating: rosu_memory_lib::reader::beatmap::common::BeatmapStarRating {
+                no_mod: 0.0,
+                dt: 0.0,
+                ht: 0.0,
+            },
+            object_count: parsed.hit_objects.len() as i32,
+            slider_count,
+        },
+        technical: BeatmapTechnicalInfo {
+            md5,
+            id: parsed.beatmap_id,
+            set_id: parsed.beatmap_set_id,
+            mode,
+            ranked_status,
+        },
+    }
 }
 
 fn build_preview_session(
@@ -656,7 +972,7 @@ fn build_playing_session(
     let no_mod_difficulty = cache.no_mod_difficulty(beatmap_path, &beatmap_info.location.cover)?;
 
     let score_state = ScoreState {
-        max_combo: gameplay.combo.max(0) as u32,
+        max_combo: gameplay.max_combo.max(0) as u32,
         n_geki: gameplay_reader
             .hits_geki()
             .unwrap_or(gameplay.hits._geki)
@@ -669,7 +985,7 @@ fn build_playing_session(
         n100: gameplay.hits._100.max(0) as u32,
         n50: gameplay.hits._50.max(0) as u32,
         misses: gameplay.hits._miss.max(0) as u32,
-        legacy_total_score: Some(gameplay.score.max(0) as u32),
+        legacy_total_score: None,
         ..ScoreState::new()
     };
 
@@ -684,6 +1000,7 @@ fn build_playing_session(
         combo,
         score_state.misses,
         current_passed_objects,
+        difficulty.max_combo(),
     );
     let partial_difficulty = Difficulty::new()
         .mods(gameplay.mods)
@@ -803,7 +1120,7 @@ fn build_result_session(
         n100: result.hits._100.max(0) as u32,
         n50: result.hits._50.max(0) as u32,
         misses: result.hits._miss.max(0) as u32,
-        legacy_total_score: Some(result.score.max(0) as u32),
+        legacy_total_score: None,
         ..ScoreState::new()
     };
 

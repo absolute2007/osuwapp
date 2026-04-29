@@ -8,7 +8,7 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
-import { convertFileSrc, invoke } from '@tauri-apps/api/core'
+import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import '@fontsource-variable/inter/index.css'
@@ -218,6 +218,7 @@ function App() {
   const [sessionGraph, setSessionGraph] = useState<number[]>([])
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
   const [isMaximized, setIsMaximized] = useState(false)
+  const [coverImage, setCoverImage] = useState<{ path: string; src: string } | null>(null)
   const currentMapKeyRef = useRef<string | null>(null)
   const mapGraphRef = useRef<number[]>([])
   const sessionGraphRef = useRef<number[]>([])
@@ -448,15 +449,32 @@ function App() {
   }, [overlayMode])
 
   const session = viewModel.session
-  let coverSrc: string | null = null
+  const coverPath = session?.beatmap.coverPath ?? null
+  const coverSrc = coverImage?.path === coverPath ? coverImage.src : null
 
-  if (session?.beatmap.coverPath && isTauriRuntime()) {
-    try {
-      coverSrc = convertFileSrc(session.beatmap.coverPath)
-    } catch {
-      coverSrc = null
+  useEffect(() => {
+    if (!coverPath || !isTauriRuntime()) {
+      return
     }
-  }
+
+    let cancelled = false
+
+    invoke<string>('load_image_data_uri', { path: coverPath })
+      .then((dataUri) => {
+        if (!cancelled) {
+          setCoverImage({ path: coverPath, src: dataUri })
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCoverImage(null)
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [coverPath])
 
   const sidebarStatusTitle =
     viewModel.connection.status === 'connected'

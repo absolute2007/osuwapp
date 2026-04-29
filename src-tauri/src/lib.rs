@@ -4,9 +4,14 @@ mod overlay;
 mod reader;
 mod storage;
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+use base64::{engine::general_purpose, Engine as _};
+use std::{
+    fs,
+    path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 use tauri::{
     menu::MenuBuilder,
@@ -107,6 +112,40 @@ fn hide_main_window(app: AppHandle) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[tauri::command]
+fn load_image_data_uri(path: String) -> Result<String, String> {
+    let path = Path::new(&path);
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+
+    if !metadata.is_file() {
+        return Err("Image path is not a file".to_string());
+    }
+
+    if metadata.len() > 20 * 1024 * 1024 {
+        return Err("Image file is too large".to_string());
+    }
+
+    let mime = match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        Some("bmp") => "image/bmp",
+        _ => return Err("Unsupported image format".to_string()),
+    };
+
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    Ok(format!(
+        "data:{mime};base64,{}",
+        general_purpose::STANDARD.encode(bytes)
+    ))
 }
 
 fn show_main_window(app: &AppHandle) {
@@ -233,6 +272,7 @@ pub fn run() {
             start_live_updates,
             get_overlay_settings,
             save_overlay_settings,
+            load_image_data_uri,
             hide_main_window,
             quit_application
         ])
