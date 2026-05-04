@@ -75,6 +75,7 @@ pub fn spawn_live_reader(app: AppHandle, latest_snapshot: Arc<Mutex<Option<AppSn
             let mut last_gameplay_mods: Option<u32> = None;
             let mut last_known_session: Option<SessionSnapshot> = None;
             let mut gameplay_tracker = GameplayTracker::default();
+            let mut consecutive_read_errors = 0;
 
             loop {
                 match build_snapshot(
@@ -98,9 +99,12 @@ pub fn spawn_live_reader(app: AppHandle, latest_snapshot: Arc<Mutex<Option<AppSn
 
                         snapshot.recent_plays = recent_plays.clone();
                         emit_snapshot(&app, &latest_snapshot, snapshot);
+                        consecutive_read_errors = 0;
                         thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
                     }
                     Err(error) => {
+                        consecutive_read_errors += 1;
+
                         emit_snapshot(
                             &app,
                             &latest_snapshot,
@@ -111,6 +115,19 @@ pub fn spawn_live_reader(app: AppHandle, latest_snapshot: Arc<Mutex<Option<AppSn
                                 recent_plays.clone(),
                             ),
                         );
+
+                        if consecutive_read_errors >= 20 {
+                            emit_snapshot(
+                                &app,
+                                &latest_snapshot,
+                                mock::searching_snapshot_with_recent(
+                                    "osu!.exe disconnected. Waiting for a new osu! process.",
+                                    recent_plays.clone(),
+                                ),
+                            );
+                            break;
+                        }
+
                         thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
                     }
                 }

@@ -31,6 +31,21 @@ export interface OverlaySettings {
   opacity: number
   showBackground: boolean
   toggleKey: string
+  ppPanel: OverlayElementSettings
+  statsPanel: OverlayElementSettings
+  hitsPanel: OverlayElementSettings
+  mapPanel: OverlayElementSettings
+}
+
+export interface OverlayElementSettings {
+  enabled: boolean
+  showBackground: boolean
+  x: number
+  y: number
+  width: number
+  height: number
+  scale: number
+  fontScale: number
 }
 
 export interface SessionSnapshot {

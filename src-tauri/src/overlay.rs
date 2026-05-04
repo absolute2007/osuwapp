@@ -16,7 +16,7 @@ use tauri::{
 use crate::models::{AppSnapshot, OverlaySettings};
 
 const OVERLAY_LABEL: &str = "overlay";
-const OVERLAY_POLL_MS: u64 = 30;
+const OVERLAY_POLL_MS: u64 = 12;
 const DEFAULT_OVERLAY_WIDTH: f64 = 420.0;
 const DEFAULT_OVERLAY_HEIGHT: f64 = 248.0;
 #[cfg(target_os = "windows")]
@@ -314,7 +314,7 @@ mod windows {
         time::{Duration, Instant},
     };
 
-    use crate::models::{OverlaySettings, SessionPhase, SessionSnapshot};
+    use crate::models::{OverlayElementSettings, OverlaySettings, SessionPhase, SessionSnapshot};
     use asdf_overlay_client::{
         common::{
             cursor::Cursor,
@@ -323,8 +323,8 @@ mod windows {
         },
         event::{
             input::{
-                CursorAction, CursorEvent, CursorInputState, InputEvent, KeyInputState,
-                KeyboardInput,
+                CursorAction, CursorEvent, CursorInput, CursorInputState, InputEvent,
+                KeyInputState, KeyboardInput,
             },
             OverlayEvent, WindowEvent,
         },
@@ -649,8 +649,41 @@ mod windows {
         last_frame_key: Option<String>,
         editor_active: bool,
         editor_settings: Option<OverlaySettings>,
+        selected_element: OverlayElement,
+        editing_field: Option<EditorField>,
+        edit_buffer: String,
+        drag_origin: Option<DragOrigin>,
         pending_settings: Option<OverlaySettings>,
         failed_until: Option<Instant>,
+    }
+
+    #[derive(Clone, Copy)]
+    struct DragOrigin {
+        element: OverlayElement,
+        cursor_x: i32,
+        cursor_y: i32,
+        offset_x: i32,
+        offset_y: i32,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum OverlayElement {
+        Whole,
+        Pp,
+        Stats,
+        Hits,
+        Map,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum EditorField {
+        Opacity,
+        Scale,
+        FontScale,
+        X,
+        Y,
+        Width,
+        Height,
     }
 
     impl InjectedOverlayState {
@@ -668,6 +701,10 @@ mod windows {
                 last_frame_key: None,
                 editor_active: false,
                 editor_settings: None,
+                selected_element: OverlayElement::Pp,
+                editing_field: None,
+                edit_buffer: String::new(),
+                drag_origin: None,
                 pending_settings: None,
                 failed_until: None,
             }
@@ -685,6 +722,10 @@ mod windows {
             self.last_frame_key = None;
             self.editor_active = false;
             self.editor_settings = None;
+            self.selected_element = OverlayElement::Pp;
+            self.editing_field = None;
+            self.edit_buffer.clear();
+            self.drag_origin = None;
             self.pending_settings = None;
         }
 
@@ -716,6 +757,9 @@ mod windows {
             if toggle_editor {
                 self.editor_active = !self.editor_active;
                 self.editor_settings = self.editor_active.then(|| settings.clone());
+                self.selected_element = OverlayElement::Pp;
+                self.editing_field = None;
+                self.edit_buffer.clear();
                 self.surface_mode = SurfaceMode::Unknown;
                 self.last_frame_key = None;
             }
@@ -785,9 +829,10 @@ mod windows {
             let desired_mode = if self.editor_active {
                 SurfaceMode::Editor
             } else {
+                let bounds = overlay_bounds(active_settings);
                 SurfaceMode::Hud {
-                    x: active_settings.offset_x,
-                    y: active_settings.offset_y,
+                    x: bounds.0,
+                    y: bounds.1,
                 }
             };
 
@@ -798,7 +843,14 @@ mod windows {
 
             let session = snapshot.and_then(|item| item.session.as_ref());
             let frame_key = if self.editor_active {
-                ingame_editor_frame_key(active_settings, session, self.window_size)
+                ingame_editor_frame_key(
+                    active_settings,
+                    session,
+                    self.window_size,
+                    self.selected_element,
+                    self.editing_field,
+                    &self.edit_buffer,
+                )
             } else {
                 ingame_frame_key(active_settings, session)
             };
@@ -807,7 +859,14 @@ mod windows {
             }
 
             let bitmap = if self.editor_active {
-                render_ingame_editor_bitmap(active_settings, session, self.window_size)
+                render_ingame_editor_bitmap(
+                    active_settings,
+                    session,
+                    self.window_size,
+                    self.selected_element,
+                    self.editing_field,
+                    &self.edit_buffer,
+                )
             } else {
                 render_ingame_bitmap(active_settings, session)
             };
@@ -861,7 +920,9 @@ mod windows {
             };
 
             let mut input_events = Vec::new();
-            for _ in 0..8 {
+            let mut latest_drag_move = None;
+            let event_limit = if self.editor_active { 64 } else { 8 };
+            for _ in 0..event_limit {
                 let event = runtime.block_on(async {
                     tokio::time::timeout(Duration::from_millis(1), events.recv()).await
                 });
@@ -882,9 +943,10 @@ mod windows {
                         let desired_mode = if self.editor_active {
                             SurfaceMode::Editor
                         } else {
+                            let bounds = overlay_bounds(settings);
                             SurfaceMode::Hud {
-                                x: settings.offset_x,
-                                y: settings.offset_y,
+                                x: bounds.0,
+                                y: bounds.1,
                             }
                         };
                         apply_surface_mode(runtime, conn, id, desired_mode);
@@ -894,7 +956,11 @@ mod windows {
                         id,
                         event: WindowEvent::Input(input),
                     } if Some(id) == self.window_id => {
-                        input_events.push(input);
+                        if self.drag_origin.is_some() && is_cursor_move(&input) {
+                            latest_drag_move = Some(input);
+                        } else {
+                            input_events.push(input);
+                        }
                     }
                     OverlayEvent::Window {
                         id,
@@ -916,6 +982,10 @@ mod windows {
                 }
             }
 
+            if let Some(input) = latest_drag_move {
+                input_events.push(input);
+            }
+
             for input in input_events {
                 self.handle_editor_input(input);
             }
@@ -930,23 +1000,45 @@ mod windows {
                 InputEvent::Keyboard(KeyboardInput::Key { key, state }) => {
                     if state == KeyInputState::Pressed {
                         let code = key.code.get();
+                        if self.editing_field.is_some() {
+                            if code == VK_RETURN.0 as u8 {
+                                self.commit_edit_buffer();
+                                return;
+                            }
+                            if code == 0x08 {
+                                self.edit_buffer.pop();
+                                self.last_frame_key = None;
+                                return;
+                            }
+                        }
                         if code == VK_END.0 as u8 || code == 0x1B {
+                            if self.editing_field.is_some() {
+                                self.editing_field = None;
+                                self.edit_buffer.clear();
+                                self.last_frame_key = None;
+                                return;
+                            }
                             self.editor_active = false;
                             self.editor_settings = None;
+                            self.drag_origin = None;
                             self.surface_mode = SurfaceMode::Unknown;
                             self.last_frame_key = None;
                         }
                     }
                 }
+                InputEvent::Keyboard(KeyboardInput::Char(character)) => {
+                    if self.editing_field.is_some()
+                        && (character.is_ascii_digit()
+                            || character == '-'
+                            || character == '.'
+                            || character == ',')
+                        && self.edit_buffer.len() < 12
+                    {
+                        self.edit_buffer.push(character);
+                        self.last_frame_key = None;
+                    }
+                }
                 InputEvent::Cursor(cursor) => {
-                    let CursorEvent::Action {
-                        state: CursorInputState::Released,
-                        action: CursorAction::Left,
-                    } = cursor.event
-                    else {
-                        return;
-                    };
-
                     let Some(settings) = self.editor_settings.as_mut() else {
                         return;
                     };
@@ -955,23 +1047,124 @@ mod windows {
                     let local_x = cursor.client.x - panel_x;
                     let local_y = cursor.client.y - panel_y;
 
-                    if in_rect(local_x, local_y, 648, 20, 84, 32) {
-                        self.editor_active = false;
-                        self.editor_settings = None;
-                        self.surface_mode = SurfaceMode::Unknown;
-                        self.last_frame_key = None;
-                        return;
-                    }
+                    match cursor.event {
+                        CursorEvent::Action {
+                            state: CursorInputState::Pressed { .. },
+                            action: CursorAction::Left,
+                        } => {
+                            if let Some((element, offset_x, offset_y)) =
+                                hit_test_overlay_element(settings, cursor.client.x, cursor.client.y)
+                            {
+                                self.drag_origin = Some(DragOrigin {
+                                    element,
+                                    cursor_x: cursor.client.x,
+                                    cursor_y: cursor.client.y,
+                                    offset_x,
+                                    offset_y,
+                                });
+                                self.selected_element = element;
+                                self.last_frame_key = None;
+                                return;
+                            }
+                        }
+                        CursorEvent::Move => {
+                            let Some(drag) = self.drag_origin else {
+                                return;
+                            };
 
-                    if apply_editor_click(settings, local_x, local_y) {
-                        let normalized = settings.clone().normalized();
-                        *settings = normalized.clone();
-                        self.pending_settings = Some(normalized);
-                        self.last_frame_key = None;
+                            let next_x = drag
+                                .offset_x
+                                .saturating_add(cursor.client.x.saturating_sub(drag.cursor_x));
+                            let next_y = drag
+                                .offset_y
+                                .saturating_add(cursor.client.y.saturating_sub(drag.cursor_y));
+                            set_overlay_element_position(settings, drag.element, next_x, next_y);
+                            let normalized = settings.clone().normalized();
+                            *settings = normalized.clone();
+                            self.last_frame_key = None;
+                            return;
+                        }
+                        CursorEvent::Action {
+                            state: CursorInputState::Released,
+                            action: CursorAction::Left,
+                        } => {
+                            if let Some(drag) = self.drag_origin {
+                                let next_x = drag
+                                    .offset_x
+                                    .saturating_add(cursor.client.x.saturating_sub(drag.cursor_x));
+                                let next_y = drag
+                                    .offset_y
+                                    .saturating_add(cursor.client.y.saturating_sub(drag.cursor_y));
+                                set_overlay_element_position(
+                                    settings,
+                                    drag.element,
+                                    next_x,
+                                    next_y,
+                                );
+                                let normalized = settings.clone().normalized();
+                                *settings = normalized.clone();
+                                self.pending_settings = Some(normalized);
+                                self.last_frame_key = None;
+                            }
+                            self.drag_origin = None;
+
+                            if in_rect(local_x, local_y, 648, 20, 84, 32) {
+                                self.editor_active = false;
+                                self.editor_settings = None;
+                                self.surface_mode = SurfaceMode::Unknown;
+                                self.last_frame_key = None;
+                                return;
+                            }
+
+                            if let Some(field) = editor_value_field_at(local_x, local_y) {
+                                self.editing_field = Some(field);
+                                self.edit_buffer = current_editor_field_value(
+                                    settings,
+                                    self.selected_element,
+                                    field,
+                                );
+                                self.last_frame_key = None;
+                                return;
+                            }
+
+                            if apply_editor_click(
+                                settings,
+                                &mut self.selected_element,
+                                local_x,
+                                local_y,
+                            ) {
+                                let normalized = settings.clone().normalized();
+                                *settings = normalized.clone();
+                                self.pending_settings = Some(normalized);
+                                self.last_frame_key = None;
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 _ => {}
             }
+        }
+
+        fn commit_edit_buffer(&mut self) {
+            let Some(field) = self.editing_field.take() else {
+                return;
+            };
+            let Some(settings) = self.editor_settings.as_mut() else {
+                self.edit_buffer.clear();
+                return;
+            };
+
+            let raw_value = self.edit_buffer.replace(',', ".");
+            if let Ok(number) = raw_value.parse::<f64>() {
+                apply_editor_field_value(settings, self.selected_element, field, number);
+                let normalized = settings.clone().normalized();
+                *settings = normalized.clone();
+                self.pending_settings = Some(normalized);
+            }
+
+            self.edit_buffer.clear();
+            self.last_frame_key = None;
         }
     }
 
@@ -1027,6 +1220,7 @@ mod windows {
         data: Vec<u8>,
     }
 
+    #[allow(dead_code)]
     struct HudLayout {
         width: u32,
         height: u32,
@@ -1034,28 +1228,35 @@ mod windows {
         body_font: i32,
         small_font: i32,
         padding: i32,
+        gap: i32,
     }
 
+    #[allow(dead_code)]
     impl HudLayout {
         fn from_settings(settings: &OverlaySettings) -> Self {
-            let ui_scale = (settings.scale * settings.font_scale).clamp(0.45, 1.85);
+            let width = settings.width.max(80);
+            let height = settings.height.max(40);
+            let ui_scale = (settings.scale * settings.font_scale).clamp(0.36, 1.5);
             Self {
-                width: settings.width.max(80),
-                height: settings.height.max(40),
-                hero_font: (24.0 * ui_scale).round().max(9.0) as i32,
-                body_font: (13.0 * ui_scale).round().max(7.0) as i32,
-                small_font: (11.0 * ui_scale).round().max(6.0) as i32,
-                padding: (settings.padding as i32).clamp(0, 32),
+                width,
+                height,
+                hero_font: (24.0 * ui_scale).round().clamp(9.0, 28.0) as i32,
+                body_font: (13.5 * ui_scale).round().clamp(7.0, 17.0) as i32,
+                small_font: (10.5 * ui_scale).round().clamp(6.0, 13.0) as i32,
+                padding: (settings.padding as i32).clamp(2, 18),
+                gap: (5.0 * ui_scale).round().clamp(2.0, 7.0) as i32,
             }
         }
     }
 
     fn ingame_frame_key(settings: &OverlaySettings, session: Option<&SessionSnapshot>) -> String {
         let mut key = format!(
-            "{}:{}:{}:{}:{}:{:.3}:{:.3}:{}:{}:{}:{}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}:{}:{:.3}:{:.3}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{:?}:{:?}:{:?}:{:?}",
             settings.enabled,
             settings.width,
             settings.height,
+            settings.offset_x,
+            settings.offset_y,
             settings.padding,
             settings.corner_radius,
             settings.scale,
@@ -1067,7 +1268,12 @@ mod windows {
             settings.show_accuracy,
             settings.show_combo,
             settings.show_mods,
+            settings.show_map,
             settings.show_hits,
+            element_key(&settings.pp_panel),
+            element_key(&settings.stats_panel),
+            element_key(&settings.hits_panel),
+            element_key(&settings.map_panel),
         );
 
         if let Some(session) = session {
@@ -1091,13 +1297,26 @@ mod windows {
         key
     }
 
+    fn element_key(element: &OverlayElementSettings) -> (bool, bool, i32, i32, u32, u32, i32, i32) {
+        (
+            element.enabled,
+            element.show_background,
+            element.x,
+            element.y,
+            element.width,
+            element.height,
+            (element.scale * 1000.0).round() as i32,
+            (element.font_scale * 1000.0).round() as i32,
+        )
+    }
+
     fn render_ingame_bitmap(
         settings: &OverlaySettings,
         session: Option<&SessionSnapshot>,
     ) -> Bitmap {
-        let layout = HudLayout::from_settings(settings);
-        let mut canvas = BitmapCanvas::new(layout.width, layout.height);
-        draw_hud_card(&mut canvas, 0, 0, settings, &layout, session);
+        let (x, y, width, height) = overlay_bounds(settings);
+        let mut canvas = BitmapCanvas::new(width, height);
+        draw_overlay_elements(&mut canvas, -x, -y, settings, session, false);
         canvas.into_bitmap()
     }
 
@@ -1105,9 +1324,15 @@ mod windows {
         settings: &OverlaySettings,
         session: Option<&SessionSnapshot>,
         window_size: Option<(u32, u32)>,
+        selected_element: OverlayElement,
+        editing_field: Option<EditorField>,
+        edit_buffer: &str,
     ) -> String {
         format!(
-            "editor:{window_size:?}:{}",
+            "editor:{window_size:?}:{}:{:?}:{}:{}",
+            selected_element_label(selected_element),
+            editing_field_key(editing_field),
+            edit_buffer,
             ingame_frame_key(settings, session)
         )
     }
@@ -1116,18 +1341,14 @@ mod windows {
         settings: &OverlaySettings,
         session: Option<&SessionSnapshot>,
         window_size: Option<(u32, u32)>,
+        selected_element: OverlayElement,
+        editing_field: Option<EditorField>,
+        edit_buffer: &str,
     ) -> Bitmap {
         let (surface_width, surface_height) = window_size.unwrap_or((1280, 720));
         let mut canvas = BitmapCanvas::new(surface_width.max(760), surface_height.max(520));
-        let hud_layout = HudLayout::from_settings(settings);
-        draw_hud_card(
-            &mut canvas,
-            settings.offset_x,
-            settings.offset_y,
-            settings,
-            &hud_layout,
-            session,
-        );
+        draw_overlay_elements(&mut canvas, 0, 0, settings, session, true);
+        draw_selected_element_outline(&mut canvas, settings, selected_element);
 
         let (panel_x, panel_y) = editor_panel_origin(Some((canvas.width, canvas.height)));
         canvas.fill_rounded_rect(panel_x, panel_y, 760, 520, 18, [14, 18, 25, 226]);
@@ -1165,11 +1386,22 @@ mod windows {
             panel_x + 26,
             panel_y + 124,
             300,
-            "HUD is shown at its real in-game position.",
+            "Drag a block. Size and scale apply to the selected block.",
             12,
             FontWeight::Normal,
             [151, 164, 184, 245],
         );
+        canvas.draw_text_clipped(
+            panel_x + 26,
+            panel_y + 154,
+            300,
+            &format!("Selected: {}", selected_element_label(selected_element)),
+            13,
+            FontWeight::Semibold,
+            [220, 231, 246, 255],
+        );
+
+        let active = selected_element_settings(settings, selected_element);
 
         draw_editor_row(
             &mut canvas,
@@ -1183,56 +1415,91 @@ mod windows {
             panel_x + 390,
             panel_y + 132,
             "Background",
-            settings.show_background,
+            active.show_background,
         );
         draw_editor_stepper(
             &mut canvas,
             panel_x + 390,
             panel_y + 190,
             "Opacity",
-            &format!("{:.0}%", settings.opacity * 100.0),
+            &editor_value_text(
+                editing_field,
+                edit_buffer,
+                EditorField::Opacity,
+                &format!("{:.0}%", settings.opacity * 100.0),
+            ),
         );
         draw_editor_stepper(
             &mut canvas,
             panel_x + 390,
             panel_y + 244,
             "Scale",
-            &format!("{:.0}%", settings.scale * 100.0),
+            &editor_value_text(
+                editing_field,
+                edit_buffer,
+                EditorField::Scale,
+                &format!("{:.0}%", active.scale * 100.0),
+            ),
         );
         draw_editor_stepper(
             &mut canvas,
             panel_x + 390,
             panel_y + 298,
             "Text",
-            &format!("{:.0}%", settings.font_scale * 100.0),
+            &editor_value_text(
+                editing_field,
+                edit_buffer,
+                EditorField::FontScale,
+                &format!("{:.0}%", active.font_scale * 100.0),
+            ),
         );
         draw_editor_stepper(
             &mut canvas,
             panel_x + 26,
             panel_y + 318,
             "X",
-            &settings.offset_x.to_string(),
+            &editor_value_text(
+                editing_field,
+                edit_buffer,
+                EditorField::X,
+                &active.x.to_string(),
+            ),
         );
         draw_editor_stepper(
             &mut canvas,
             panel_x + 196,
             panel_y + 318,
             "Y",
-            &settings.offset_y.to_string(),
+            &editor_value_text(
+                editing_field,
+                edit_buffer,
+                EditorField::Y,
+                &active.y.to_string(),
+            ),
         );
         draw_editor_stepper(
             &mut canvas,
             panel_x + 26,
             panel_y + 372,
             "Width",
-            &settings.width.to_string(),
+            &editor_value_text(
+                editing_field,
+                edit_buffer,
+                EditorField::Width,
+                &active.width.to_string(),
+            ),
         );
         draw_editor_stepper(
             &mut canvas,
             panel_x + 196,
             panel_y + 372,
             "Height",
-            &settings.height.to_string(),
+            &editor_value_text(
+                editing_field,
+                edit_buffer,
+                EditorField::Height,
+                &active.height.to_string(),
+            ),
         );
 
         draw_metric_toggle(
@@ -1394,13 +1661,147 @@ mod windows {
         );
     }
 
-    fn apply_editor_click(settings: &mut OverlaySettings, x: i32, y: i32) -> bool {
+    fn editor_value_text(
+        editing_field: Option<EditorField>,
+        edit_buffer: &str,
+        field: EditorField,
+        fallback: &str,
+    ) -> String {
+        if editing_field == Some(field) {
+            if edit_buffer.is_empty() {
+                "|".to_string()
+            } else {
+                format!("{edit_buffer}|")
+            }
+        } else {
+            fallback.to_string()
+        }
+    }
+
+    fn editor_value_field_at(x: i32, y: i32) -> Option<EditorField> {
+        for (field, sx, sy) in [
+            (EditorField::Opacity, 390, 190),
+            (EditorField::Scale, 390, 244),
+            (EditorField::FontScale, 390, 298),
+            (EditorField::X, 26, 318),
+            (EditorField::Y, 196, 318),
+            (EditorField::Width, 26, 372),
+            (EditorField::Height, 196, 372),
+        ] {
+            if in_rect(x, y, sx + 42, sy + 20, 76, 30) {
+                return Some(field);
+            }
+        }
+
+        None
+    }
+
+    fn current_editor_field_value(
+        settings: &OverlaySettings,
+        selected_element: OverlayElement,
+        field: EditorField,
+    ) -> String {
+        let element = selected_element_settings(settings, selected_element);
+        match field {
+            EditorField::Opacity => format!("{:.0}", settings.opacity * 100.0),
+            EditorField::Scale => format!("{:.0}", element.scale * 100.0),
+            EditorField::FontScale => format!("{:.0}", element.font_scale * 100.0),
+            EditorField::X => element.x.to_string(),
+            EditorField::Y => element.y.to_string(),
+            EditorField::Width => element.width.to_string(),
+            EditorField::Height => element.height.to_string(),
+        }
+    }
+
+    fn apply_editor_field_value(
+        settings: &mut OverlaySettings,
+        selected_element: OverlayElement,
+        field: EditorField,
+        number: f64,
+    ) {
+        match field {
+            EditorField::Opacity => settings.opacity = number / 100.0,
+            EditorField::Scale => {
+                selected_element_settings_mut(settings, selected_element).scale = number / 100.0
+            }
+            EditorField::FontScale => {
+                selected_element_settings_mut(settings, selected_element).font_scale =
+                    number / 100.0
+            }
+            EditorField::X => {
+                selected_element_settings_mut(settings, selected_element).x = number.round() as i32
+            }
+            EditorField::Y => {
+                selected_element_settings_mut(settings, selected_element).y = number.round() as i32
+            }
+            EditorField::Width => {
+                selected_element_settings_mut(settings, selected_element).width =
+                    number.round().max(1.0) as u32
+            }
+            EditorField::Height => {
+                selected_element_settings_mut(settings, selected_element).height =
+                    number.round().max(1.0) as u32
+            }
+        }
+    }
+
+    fn editing_field_key(field: Option<EditorField>) -> &'static str {
+        match field {
+            Some(EditorField::Opacity) => "opacity",
+            Some(EditorField::Scale) => "scale",
+            Some(EditorField::FontScale) => "font",
+            Some(EditorField::X) => "x",
+            Some(EditorField::Y) => "y",
+            Some(EditorField::Width) => "width",
+            Some(EditorField::Height) => "height",
+            None => "none",
+        }
+    }
+
+    fn apply_editor_click(
+        settings: &mut OverlaySettings,
+        selected_element: &mut OverlayElement,
+        x: i32,
+        y: i32,
+    ) -> bool {
+        for (element, bx, by) in [
+            (OverlayElement::Pp, 390, 372),
+            (OverlayElement::Stats, 472, 372),
+            (OverlayElement::Hits, 636, 372),
+            (OverlayElement::Map, 554, 420),
+        ] {
+            if in_rect(x, y, bx, by, 72, 34) {
+                if *selected_element == element {
+                    match element {
+                        OverlayElement::Pp => settings.show_pp = !settings.show_pp,
+                        OverlayElement::Stats => {
+                            let next = !(settings.show_if_fc
+                                || settings.show_accuracy
+                                || settings.show_combo
+                                || settings.show_mods);
+                            settings.show_if_fc = next;
+                            settings.show_accuracy = next;
+                            settings.show_combo = next;
+                            settings.show_mods = next;
+                        }
+                        OverlayElement::Hits => settings.show_hits = !settings.show_hits,
+                        OverlayElement::Map => settings.show_map = !settings.show_map,
+                        OverlayElement::Whole => {}
+                    }
+                } else {
+                    *selected_element = element;
+                }
+                return true;
+            }
+        }
+
         if in_rect(x, y, 628, 88, 44, 24) {
             settings.enabled = !settings.enabled;
             return true;
         }
         if in_rect(x, y, 628, 132, 44, 24) {
-            settings.show_background = !settings.show_background;
+            let element = selected_element_settings_mut(settings, *selected_element);
+            element.show_background = !element.show_background;
             return true;
         }
         if stepper_click(x, y, 390, 190) == Some(-1) {
@@ -1412,51 +1813,53 @@ mod windows {
             return true;
         }
         if stepper_click(x, y, 390, 244) == Some(-1) {
-            settings.scale -= 0.05;
+            selected_element_settings_mut(settings, *selected_element).scale -= 0.05;
             return true;
         }
         if stepper_click(x, y, 390, 244) == Some(1) {
-            settings.scale += 0.05;
+            selected_element_settings_mut(settings, *selected_element).scale += 0.05;
             return true;
         }
         if stepper_click(x, y, 390, 298) == Some(-1) {
-            settings.font_scale -= 0.05;
+            selected_element_settings_mut(settings, *selected_element).font_scale -= 0.05;
             return true;
         }
         if stepper_click(x, y, 390, 298) == Some(1) {
-            settings.font_scale += 0.05;
+            selected_element_settings_mut(settings, *selected_element).font_scale += 0.05;
             return true;
         }
         if stepper_click(x, y, 26, 318) == Some(-1) {
-            settings.offset_x -= 5;
+            selected_element_settings_mut(settings, *selected_element).x -= 5;
             return true;
         }
         if stepper_click(x, y, 26, 318) == Some(1) {
-            settings.offset_x += 5;
+            selected_element_settings_mut(settings, *selected_element).x += 5;
             return true;
         }
         if stepper_click(x, y, 196, 318) == Some(-1) {
-            settings.offset_y -= 5;
+            selected_element_settings_mut(settings, *selected_element).y -= 5;
             return true;
         }
         if stepper_click(x, y, 196, 318) == Some(1) {
-            settings.offset_y += 5;
+            selected_element_settings_mut(settings, *selected_element).y += 5;
             return true;
         }
         if stepper_click(x, y, 26, 372) == Some(-1) {
-            settings.width = settings.width.saturating_sub(10);
+            let element = selected_element_settings_mut(settings, *selected_element);
+            element.width = element.width.saturating_sub(10);
             return true;
         }
         if stepper_click(x, y, 26, 372) == Some(1) {
-            settings.width += 10;
+            selected_element_settings_mut(settings, *selected_element).width += 10;
             return true;
         }
         if stepper_click(x, y, 196, 372) == Some(-1) {
-            settings.height = settings.height.saturating_sub(10);
+            let element = selected_element_settings_mut(settings, *selected_element);
+            element.height = element.height.saturating_sub(10);
             return true;
         }
         if stepper_click(x, y, 196, 372) == Some(1) {
-            settings.height += 10;
+            selected_element_settings_mut(settings, *selected_element).height += 10;
             return true;
         }
         if in_rect(x, y, 390, 372, 72, 34) {
@@ -1500,6 +1903,16 @@ mod windows {
         }
     }
 
+    fn is_cursor_move(input: &InputEvent) -> bool {
+        matches!(
+            input,
+            InputEvent::Cursor(CursorInput {
+                event: CursorEvent::Move,
+                ..
+            })
+        )
+    }
+
     fn in_rect(x: i32, y: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool {
         x >= rx && x < rx + rw && y >= ry && y < ry + rh
     }
@@ -1512,6 +1925,467 @@ mod windows {
         }
     }
 
+    fn overlay_bounds(settings: &OverlaySettings) -> (i32, i32, u32, u32) {
+        let mut left = settings.offset_x;
+        let mut top = settings.offset_y;
+        let mut right = settings.offset_x + settings.width as i32;
+        let mut bottom = settings.offset_y + settings.height as i32;
+
+        for (visible, element) in [
+            (settings.show_pp, &settings.pp_panel),
+            (
+                settings.show_if_fc
+                    || settings.show_accuracy
+                    || settings.show_combo
+                    || settings.show_mods,
+                &settings.stats_panel,
+            ),
+            (settings.show_hits, &settings.hits_panel),
+            (settings.show_map, &settings.map_panel),
+        ] {
+            if !visible || !element.enabled {
+                continue;
+            }
+
+            left = left.min(element.x);
+            top = top.min(element.y);
+            right = right.max(element.x + element.width as i32);
+            bottom = bottom.max(element.y + element.height as i32);
+        }
+
+        (
+            left,
+            top,
+            (right - left).max(1) as u32,
+            (bottom - top).max(1) as u32,
+        )
+    }
+
+    fn hit_test_overlay_element(
+        settings: &OverlaySettings,
+        x: i32,
+        y: i32,
+    ) -> Option<(OverlayElement, i32, i32)> {
+        for (element, item) in [
+            (OverlayElement::Map, &settings.map_panel),
+            (OverlayElement::Hits, &settings.hits_panel),
+            (OverlayElement::Stats, &settings.stats_panel),
+            (OverlayElement::Pp, &settings.pp_panel),
+        ] {
+            let visible = match element {
+                OverlayElement::Pp => settings.show_pp,
+                OverlayElement::Stats => {
+                    settings.show_if_fc
+                        || settings.show_accuracy
+                        || settings.show_combo
+                        || settings.show_mods
+                }
+                OverlayElement::Hits => settings.show_hits,
+                OverlayElement::Map => settings.show_map,
+                OverlayElement::Whole => true,
+            };
+            if visible
+                && item.enabled
+                && in_rect(x, y, item.x, item.y, item.width as i32, item.height as i32)
+            {
+                return Some((element, item.x, item.y));
+            }
+        }
+
+        if in_rect(
+            x,
+            y,
+            settings.offset_x,
+            settings.offset_y,
+            settings.width as i32,
+            settings.height as i32,
+        ) {
+            return Some((OverlayElement::Whole, settings.offset_x, settings.offset_y));
+        }
+
+        None
+    }
+
+    fn set_overlay_element_position(
+        settings: &mut OverlaySettings,
+        element: OverlayElement,
+        x: i32,
+        y: i32,
+    ) {
+        match element {
+            OverlayElement::Whole => {
+                settings.offset_x = x;
+                settings.offset_y = y;
+            }
+            OverlayElement::Pp => {
+                settings.pp_panel.x = x;
+                settings.pp_panel.y = y;
+            }
+            OverlayElement::Stats => {
+                settings.stats_panel.x = x;
+                settings.stats_panel.y = y;
+            }
+            OverlayElement::Hits => {
+                settings.hits_panel.x = x;
+                settings.hits_panel.y = y;
+            }
+            OverlayElement::Map => {
+                settings.map_panel.x = x;
+                settings.map_panel.y = y;
+            }
+        }
+    }
+
+    fn selected_element_settings(
+        settings: &OverlaySettings,
+        element: OverlayElement,
+    ) -> &OverlayElementSettings {
+        match element {
+            OverlayElement::Whole | OverlayElement::Pp => &settings.pp_panel,
+            OverlayElement::Stats => &settings.stats_panel,
+            OverlayElement::Hits => &settings.hits_panel,
+            OverlayElement::Map => &settings.map_panel,
+        }
+    }
+
+    fn selected_element_settings_mut(
+        settings: &mut OverlaySettings,
+        element: OverlayElement,
+    ) -> &mut OverlayElementSettings {
+        match element {
+            OverlayElement::Whole | OverlayElement::Pp => &mut settings.pp_panel,
+            OverlayElement::Stats => &mut settings.stats_panel,
+            OverlayElement::Hits => &mut settings.hits_panel,
+            OverlayElement::Map => &mut settings.map_panel,
+        }
+    }
+
+    fn selected_element_label(element: OverlayElement) -> &'static str {
+        match element {
+            OverlayElement::Whole => "Overlay",
+            OverlayElement::Pp => "PP",
+            OverlayElement::Stats => "Stats",
+            OverlayElement::Hits => "Hits",
+            OverlayElement::Map => "Map",
+        }
+    }
+
+    fn draw_selected_element_outline(
+        canvas: &mut BitmapCanvas,
+        settings: &OverlaySettings,
+        element: OverlayElement,
+    ) {
+        let item = selected_element_settings(settings, element);
+        canvas.stroke_rounded_rect(
+            item.x - 2,
+            item.y - 2,
+            item.width as i32 + 4,
+            item.height as i32 + 4,
+            8,
+            [255, 224, 92, 230],
+        );
+    }
+
+    fn draw_overlay_elements(
+        canvas: &mut BitmapCanvas,
+        offset_x: i32,
+        offset_y: i32,
+        settings: &OverlaySettings,
+        session: Option<&SessionSnapshot>,
+        editor: bool,
+    ) {
+        let _ = editor;
+
+        let Some(session) = session else {
+            draw_single_panel_text(
+                canvas,
+                settings.offset_x + offset_x,
+                settings.offset_y + offset_y,
+                settings.width,
+                settings.height,
+                settings.scale,
+                settings.font_scale,
+                settings,
+                settings.show_background,
+                "Waiting for osu!",
+                [230, 238, 249, 255],
+            );
+            return;
+        };
+
+        if settings.show_pp && settings.pp_panel.enabled {
+            draw_single_panel_text(
+                canvas,
+                settings.pp_panel.x + offset_x,
+                settings.pp_panel.y + offset_y,
+                settings.pp_panel.width,
+                settings.pp_panel.height,
+                settings.pp_panel.scale,
+                settings.pp_panel.font_scale,
+                settings,
+                settings.pp_panel.show_background,
+                &format!("{:.2} PP", session.pp.current),
+                [250, 252, 255, 255],
+            );
+        }
+
+        if settings.stats_panel.enabled
+            && (settings.show_if_fc
+                || settings.show_accuracy
+                || settings.show_combo
+                || settings.show_mods)
+        {
+            let mut cells = Vec::new();
+            if settings.show_if_fc {
+                cells.push(("IF FC".to_string(), format!("{:.2}", session.pp.if_fc)));
+            }
+            if settings.show_accuracy {
+                cells.push((
+                    "ACC".to_string(),
+                    session
+                        .live
+                        .accuracy
+                        .map(|value| format!("{value:.2}%"))
+                        .unwrap_or_else(|| "--".to_string()),
+                ));
+            }
+            if settings.show_combo {
+                cells.push(("COMBO".to_string(), format!("{}x", session.live.combo)));
+            }
+            if settings.show_mods {
+                cells.push(("MODS".to_string(), session.live.mods_text.clone()));
+            }
+            draw_separate_metric_panel(
+                canvas,
+                &settings.stats_panel,
+                offset_x,
+                offset_y,
+                settings,
+                &cells,
+            );
+        }
+
+        if settings.show_hits && settings.hits_panel.enabled {
+            draw_separate_hit_panel(
+                canvas,
+                &settings.hits_panel,
+                offset_x,
+                offset_y,
+                settings,
+                &session.live.hits,
+            );
+        }
+
+        if settings.show_map && settings.map_panel.enabled {
+            draw_single_panel_text(
+                canvas,
+                settings.map_panel.x + offset_x,
+                settings.map_panel.y + offset_y,
+                settings.map_panel.width,
+                settings.map_panel.height,
+                settings.map_panel.scale,
+                settings.map_panel.font_scale,
+                settings,
+                settings.map_panel.show_background,
+                &format!(
+                    "{} - {} [{}]",
+                    session.beatmap.artist, session.beatmap.title, session.beatmap.difficulty_name
+                ),
+                [220, 231, 244, 248],
+            );
+        }
+    }
+
+    fn draw_panel_shell(
+        canvas: &mut BitmapCanvas,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        settings: &OverlaySettings,
+        show_background: bool,
+    ) {
+        if show_background {
+            canvas.fill_rounded_rect(
+                x,
+                y,
+                width as i32,
+                height as i32,
+                7,
+                [
+                    18,
+                    22,
+                    30,
+                    (settings.opacity * 224.0).clamp(0.0, 238.0) as u8,
+                ],
+            );
+            canvas.stroke_rounded_rect(
+                x,
+                y,
+                width as i32,
+                height as i32,
+                7,
+                [
+                    92,
+                    108,
+                    134,
+                    (settings.opacity * 110.0).clamp(0.0, 150.0) as u8,
+                ],
+            );
+        }
+    }
+
+    fn draw_single_panel_text(
+        canvas: &mut BitmapCanvas,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        scale: f64,
+        font_scale: f64,
+        settings: &OverlaySettings,
+        show_background: bool,
+        text: &str,
+        color: [u8; 4],
+    ) {
+        draw_panel_shell(canvas, x, y, width, height, settings, show_background);
+        let inset = 5;
+        let max_font_by_height = ((height as i32 - inset * 2) as f64 / 1.35).floor() as i32;
+        let max_font_by_width =
+            ((width as f64 - inset as f64 * 2.0) / text.len().max(1) as f64 * 1.75).floor() as i32;
+        let font = ((20.0 * scale * font_scale).round() as i32)
+            .min(max_font_by_height)
+            .min(max_font_by_width)
+            .clamp(6, 28);
+        canvas.draw_text_clipped(
+            x + inset,
+            y + ((height as i32 - font) / 2).max(1) - 2,
+            width as i32 - inset * 2,
+            text,
+            font,
+            FontWeight::Bold,
+            color,
+        );
+    }
+
+    fn draw_separate_metric_panel(
+        canvas: &mut BitmapCanvas,
+        element: &OverlayElementSettings,
+        offset_x: i32,
+        offset_y: i32,
+        settings: &OverlaySettings,
+        cells: &[(String, String)],
+    ) {
+        if cells.is_empty() {
+            return;
+        }
+
+        let x = element.x + offset_x;
+        let y = element.y + offset_y;
+        draw_panel_shell(
+            canvas,
+            x,
+            y,
+            element.width,
+            element.height,
+            settings,
+            element.show_background,
+        );
+        let columns = cells.len().max(1) as i32;
+        let gap = 3;
+        let cell_width = ((element.width as i32 - 8 - gap * (columns - 1)) / columns).max(12);
+        let available_height = element.height as i32 - 6;
+        let label_font =
+            ((available_height as f64 * 0.32 * element.font_scale).round() as i32).clamp(5, 11);
+        let value_font =
+            ((available_height as f64 * 0.46 * element.font_scale).round() as i32).clamp(6, 14);
+
+        for (index, (label, value)) in cells.iter().enumerate() {
+            let cell_x = x + 4 + index as i32 * (cell_width + gap);
+            if element.show_background {
+                canvas.fill_rounded_rect(
+                    cell_x,
+                    y + 4,
+                    cell_width,
+                    element.height as i32 - 8,
+                    5,
+                    [26, 32, 43, 120],
+                );
+            }
+            canvas.draw_text_clipped(
+                cell_x + 3,
+                y + 5,
+                cell_width - 6,
+                label,
+                label_font.min((element.height as i32 / 3).max(5)),
+                FontWeight::Semibold,
+                [178, 193, 216, 245],
+            );
+            canvas.draw_text_clipped(
+                cell_x + 3,
+                y + 6 + label_font,
+                cell_width - 6,
+                value,
+                value_font.min((element.height as i32 - label_font - 9).max(6)),
+                FontWeight::Bold,
+                [250, 252, 255, 255],
+            );
+        }
+    }
+
+    fn draw_separate_hit_panel(
+        canvas: &mut BitmapCanvas,
+        element: &OverlayElementSettings,
+        offset_x: i32,
+        offset_y: i32,
+        settings: &OverlaySettings,
+        hits: &crate::models::HitSnapshot,
+    ) {
+        let x = element.x + offset_x;
+        let y = element.y + offset_y;
+        draw_panel_shell(
+            canvas,
+            x,
+            y,
+            element.width,
+            element.height,
+            settings,
+            element.show_background,
+        );
+        let parts = [
+            ("100", hits.n100, [92, 170, 255, 255], [37, 82, 148, 180]),
+            ("50", hits.n50, [255, 190, 86, 255], [145, 83, 31, 180]),
+            ("MISS", hits.misses, [255, 91, 112, 255], [152, 39, 55, 180]),
+            (
+                "SB",
+                hits.slider_breaks,
+                [190, 132, 255, 255],
+                [102, 66, 160, 180],
+            ),
+        ];
+        let gap = 3;
+        let cell_width = ((element.width as i32 - 8 - gap * 3) / 4).max(10);
+        let cell_height = (element.height as i32 - 8).max(10);
+        let font = ((cell_height as f64 * 0.62 * element.font_scale).round() as i32).clamp(5, 12);
+
+        for (index, (label, value, color, bg)) in parts.into_iter().enumerate() {
+            let cell_x = x + 4 + index as i32 * (cell_width + gap);
+            if element.show_background {
+                canvas.fill_rounded_rect(cell_x, y + 4, cell_width, cell_height, 5, bg);
+            }
+            canvas.draw_text_clipped(
+                cell_x + 2,
+                y + ((element.height as i32 - font) / 2).max(1) - 2,
+                cell_width - 4,
+                &format!("{label} {value}"),
+                font.min((element.height as i32 - 8).max(5)),
+                FontWeight::Bold,
+                color,
+            );
+        }
+    }
+
+    #[allow(dead_code)]
     fn draw_hud_card(
         canvas: &mut BitmapCanvas,
         origin_x: i32,
@@ -1555,16 +2429,35 @@ mod windows {
             let mut y = origin_y + padding;
             if settings.show_pp {
                 let pp_label = format!("{:.2} PP", session.pp.current);
+                let hero_height = (layout.hero_font as f32 * 1.08).round() as i32;
+                let hero_width =
+                    content_width.min((pp_label.len() as i32 * layout.hero_font / 2).max(72));
+                let panel_width = content_width.min(hero_width + layout.gap * 4);
+                if settings.show_background {
+                    canvas.fill_rounded_rect(
+                        origin_x + padding,
+                        y,
+                        panel_width,
+                        hero_height + layout.gap,
+                        7,
+                        [
+                            20,
+                            25,
+                            34,
+                            (settings.opacity * 154.0).clamp(0.0, 190.0) as u8,
+                        ],
+                    );
+                }
                 canvas.draw_text_clipped(
-                    origin_x + padding,
-                    y,
-                    content_width,
+                    origin_x + padding + layout.gap,
+                    y + 1,
+                    panel_width - layout.gap * 2,
                     &pp_label,
                     layout.hero_font,
-                    FontWeight::Semibold,
+                    FontWeight::Bold,
                     [246, 249, 255, 255],
                 );
-                y += (layout.hero_font as f32 * 1.25).round() as i32;
+                y += hero_height + layout.gap * 2;
             }
 
             let mut metric_cells = Vec::new();
@@ -1617,14 +2510,28 @@ mod windows {
                     "{} - {} [{}]",
                     session.beatmap.artist, session.beatmap.title, session.beatmap.difficulty_name
                 );
-                canvas.draw_text_clipped(
+                let map_height = (layout.small_font as f32 * 1.8).round().max(14.0) as i32;
+                canvas.fill_rounded_rect(
                     origin_x + padding,
-                    y + 2,
+                    y,
                     content_width,
+                    map_height,
+                    7,
+                    [
+                        25,
+                        30,
+                        39,
+                        (settings.opacity * 142.0).clamp(0.0, 175.0) as u8,
+                    ],
+                );
+                canvas.draw_text_clipped(
+                    origin_x + padding + layout.gap,
+                    y + ((map_height - layout.small_font) / 2).max(1),
+                    content_width - layout.gap * 2,
                     &map,
                     layout.small_font,
-                    FontWeight::Normal,
-                    [160, 173, 194, 230],
+                    FontWeight::Semibold,
+                    [216, 226, 240, 246],
                 );
             }
         } else {
@@ -1640,6 +2547,7 @@ mod windows {
         }
     }
 
+    #[allow(dead_code)]
     fn draw_metric_cells(
         canvas: &mut BitmapCanvas,
         x: i32,
@@ -1649,62 +2557,73 @@ mod windows {
         settings: &OverlaySettings,
         cells: &[(String, String)],
     ) -> i32 {
-        let gap = 6;
-        let visible_count = cells.len().max(1) as i32;
-        let cell_width = ((max_width - gap * (visible_count - 1)) / visible_count).max(24);
-        let cell_height = ((layout.body_font as f32 * 2.2).round() as i32).max(22);
+        let gap = layout.gap;
+        let columns = if max_width < 128 {
+            1
+        } else if max_width < 220 || cells.len() <= 2 {
+            2.min(cells.len().max(1) as i32)
+        } else {
+            cells.len().min(4) as i32
+        };
+        let cell_width = ((max_width - gap * (columns - 1)) / columns).max(26);
+        let cell_height = ((layout.body_font as f32 * 2.05).round() as i32).max(19);
 
         for (index, (label, value)) in cells.iter().enumerate() {
-            let cell_x = x + index as i32 * (cell_width + gap);
+            let row = index as i32 / columns;
+            let column = index as i32 % columns;
+            let cell_x = x + column * (cell_width + gap);
+            let cell_y = y + row * (cell_height + gap);
             canvas.fill_rounded_rect(
                 cell_x,
-                y,
+                cell_y,
                 cell_width,
                 cell_height,
-                8,
+                7,
                 [
                     27,
                     32,
                     42,
-                    (settings.opacity * 178.0).clamp(0.0, 200.0) as u8,
+                    (settings.opacity * 188.0).clamp(0.0, 210.0) as u8,
                 ],
             );
             canvas.stroke_rounded_rect(
                 cell_x,
-                y,
+                cell_y,
                 cell_width,
                 cell_height,
-                8,
+                7,
                 [
                     85,
                     96,
                     116,
-                    (settings.opacity * 86.0).clamp(0.0, 120.0) as u8,
+                    (settings.opacity * 96.0).clamp(0.0, 130.0) as u8,
                 ],
             );
             canvas.draw_text_clipped(
-                cell_x + 6,
-                y + 3,
-                cell_width - 12,
+                cell_x + 5,
+                cell_y + 2,
+                cell_width - 10,
                 label,
                 layout.small_font,
                 FontWeight::Semibold,
-                [134, 149, 172, 230],
+                [165, 180, 202, 245],
             );
             canvas.draw_text_clipped(
-                cell_x + 6,
-                y + 5 + layout.small_font,
-                cell_width - 12,
+                cell_x + 5,
+                cell_y + 4 + layout.small_font,
+                cell_width - 10,
                 value,
                 layout.body_font,
-                FontWeight::Semibold,
+                FontWeight::Bold,
                 [240, 245, 252, 255],
             );
         }
 
-        y + cell_height + 6
+        let rows = ((cells.len() as i32 + columns - 1) / columns).max(1);
+        y + rows * cell_height + (rows - 1) * gap + gap
     }
 
+    #[allow(dead_code)]
     fn draw_hit_counts(
         canvas: &mut BitmapCanvas,
         x: i32,
@@ -1724,26 +2643,38 @@ mod windows {
                 [102, 66, 160, 150],
             ),
         ];
-        let gap = 5;
-        let cell_width = ((max_width - gap * 3) / 4).max(18);
-        let cell_height = (font_px as f32 * 1.95).round().max(18.0) as i32;
+        let gap = 4.max(font_px / 3);
+        let columns = if max_width < 132 { 2 } else { 4 };
+        let cell_width = ((max_width - gap * (columns - 1)) / columns).max(22);
+        let cell_height = (font_px as f32 * 1.75).round().max(16.0) as i32;
 
         for (index, (label, value, color, bg)) in parts.into_iter().enumerate() {
-            let cell_x = x + index as i32 * (cell_width + gap);
-            canvas.fill_rounded_rect(cell_x, y, cell_width, cell_height, 7, bg);
-            canvas.stroke_rounded_rect(cell_x, y, cell_width, cell_height, 7, [100, 111, 132, 78]);
+            let row = index as i32 / columns;
+            let column = index as i32 % columns;
+            let cell_x = x + column * (cell_width + gap);
+            let cell_y = y + row * (cell_height + gap);
+            canvas.fill_rounded_rect(cell_x, cell_y, cell_width, cell_height, 6, bg);
+            canvas.stroke_rounded_rect(
+                cell_x,
+                cell_y,
+                cell_width,
+                cell_height,
+                6,
+                [100, 111, 132, 92],
+            );
             canvas.draw_text_clipped(
-                cell_x + 5,
-                y + 3,
-                cell_width - 10,
+                cell_x + 4,
+                cell_y + ((cell_height - font_px) / 2).max(1),
+                cell_width - 8,
                 &format!("{label} {value}"),
                 font_px,
-                FontWeight::Semibold,
+                FontWeight::Bold,
                 color,
             );
         }
 
-        y + cell_height + 5
+        let rows = (4 + columns - 1) / columns;
+        y + rows * cell_height + (rows - 1) * gap + gap
     }
 
     struct BitmapCanvas {
@@ -1886,6 +2817,7 @@ mod windows {
     enum FontWeight {
         Normal,
         Semibold,
+        Bold,
     }
 
     struct TextMask {
@@ -1950,16 +2882,19 @@ mod windows {
     fn overlay_font(weight: FontWeight) -> Option<&'static fontdue::Font> {
         static REGULAR: OnceLock<Option<fontdue::Font>> = OnceLock::new();
         static SEMIBOLD: OnceLock<Option<fontdue::Font>> = OnceLock::new();
+        static BOLD: OnceLock<Option<fontdue::Font>> = OnceLock::new();
 
         let slot = match weight {
             FontWeight::Normal => &REGULAR,
             FontWeight::Semibold => &SEMIBOLD,
+            FontWeight::Bold => &BOLD,
         };
 
         slot.get_or_init(|| {
             let path = match weight {
                 FontWeight::Normal => "C:\\Windows\\Fonts\\segoeui.ttf",
                 FontWeight::Semibold => "C:\\Windows\\Fonts\\seguisb.ttf",
+                FontWeight::Bold => "C:\\Windows\\Fonts\\segoeuib.ttf",
             };
             let bytes = fs::read(path).ok()?;
             fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()).ok()

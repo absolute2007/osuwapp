@@ -4,6 +4,7 @@ import {
   useDeferredValue,
   useEffect,
   useEffectEvent,
+  useLayoutEffect,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
@@ -47,6 +48,10 @@ const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
   opacity: 0.92,
   showBackground: true,
   toggleKey: 'Insert',
+  ppPanel: { enabled: true, showBackground: true, x: 0, y: 0, width: 220, height: 40, scale: 1, fontScale: 1 },
+  statsPanel: { enabled: true, showBackground: true, x: 0, y: 42, width: 220, height: 34, scale: 1, fontScale: 1 },
+  hitsPanel: { enabled: true, showBackground: true, x: 0, y: 78, width: 220, height: 22, scale: 1, fontScale: 1 },
+  mapPanel: { enabled: true, showBackground: true, x: 0, y: 104, width: 360, height: 24, scale: 1, fontScale: 1 },
 }
 
 type AppView = 'session' | 'recent' | 'overlay' | 'settings' | 'about'
@@ -753,11 +758,75 @@ function OverlayHudCard({
   session: SessionSnapshot | null
   settings: OverlaySettings
 }) {
+  const shellRef = useRef<HTMLDivElement | null>(null)
+  const contentRef = useRef<HTMLDivElement | null>(null)
+  const [autoScale, setAutoScale] = useState(1)
+
+  useLayoutEffect(() => {
+    if (!session) {
+      return
+    }
+
+    const shell = shellRef.current
+    const content = contentRef.current
+
+    if (!shell || !content) {
+      return
+    }
+
+    let frame = 0
+
+    const syncScale = () => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        const availableWidth = shell.clientWidth
+        const availableHeight = shell.clientHeight
+        const currentScale = settings.scale * autoScale || 1
+        const naturalWidth = content.scrollWidth * currentScale
+        const naturalHeight = content.scrollHeight * currentScale
+
+        if (availableWidth <= 0 || availableHeight <= 0) {
+          return
+        }
+
+        const nextAutoScale = Math.min(
+          1,
+          availableWidth / Math.max(naturalWidth, 1),
+          availableHeight / Math.max(naturalHeight, 1),
+        )
+        const clampedScale = Math.max(0.42, Number(nextAutoScale.toFixed(3)))
+
+        setAutoScale((current) => (Math.abs(current - clampedScale) > 0.01 ? clampedScale : current))
+      })
+    }
+
+    syncScale()
+
+    const resizeObserver = new ResizeObserver(syncScale)
+    resizeObserver.observe(shell)
+    resizeObserver.observe(content)
+
+    return () => {
+      cancelAnimationFrame(frame)
+      resizeObserver.disconnect()
+    }
+  }, [autoScale, session, settings.scale])
+
+  const effectiveScale = settings.scale * autoScale
+
   return (
     <div className={`${className} ${settings.showBackground ? '' : 'overlay-card--bare'}`}>
       {session ? (
-        <div className="overlay-card__scale-shell">
-          <div className="overlay-card__scale-content">
+        <div
+          className="overlay-card__scale-shell"
+          ref={shellRef}
+          style={
+            {
+              '--overlay-effective-scale': effectiveScale.toString(),
+            } as CSSProperties
+          }
+        >
+          <div className="overlay-card__scale-content" ref={contentRef}>
             <div className="overlay-card__content overlay-card__content--hud">
               {settings.showPp ? (
                 <div className="overlay-card__hero overlay-card__hero--hud">
@@ -768,25 +837,25 @@ function OverlayHudCard({
 
               <div className="overlay-card__stats overlay-card__stats--hud">
                 {settings.showIfFc ? (
-                  <div>
+                  <div className="overlay-metric">
                     <span>IF FC</span>
                     <strong>{session.pp.ifFc.toFixed(2)}</strong>
                   </div>
                 ) : null}
                 {settings.showAccuracy ? (
-                  <div>
+                  <div className="overlay-metric">
                     <span>ACC</span>
                     <strong>{formatAccuracy(session.live.accuracy)}</strong>
                   </div>
                 ) : null}
                 {settings.showCombo ? (
-                  <div>
+                  <div className="overlay-metric">
                     <span>COMBO</span>
                     <strong>{session.live.combo}x</strong>
                   </div>
                 ) : null}
                 {settings.showMods ? (
-                  <div>
+                  <div className="overlay-metric">
                     <span>MODS</span>
                     <strong>{session.live.modsText}</strong>
                   </div>

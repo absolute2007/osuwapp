@@ -30,6 +30,54 @@ pub struct OverlaySettings {
     pub opacity: f64,
     pub show_background: bool,
     pub toggle_key: String,
+    pub pp_panel: OverlayElementSettings,
+    pub stats_panel: OverlayElementSettings,
+    pub hits_panel: OverlayElementSettings,
+    pub map_panel: OverlayElementSettings,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OverlayElementSettings {
+    pub enabled: bool,
+    pub show_background: bool,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale: f64,
+    pub font_scale: f64,
+}
+
+impl OverlayElementSettings {
+    pub fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
+        Self {
+            enabled: true,
+            show_background: true,
+            x,
+            y,
+            width,
+            height,
+            scale: 1.0,
+            font_scale: 1.0,
+        }
+    }
+
+    pub fn normalized(mut self) -> Self {
+        self.x = self.x.clamp(-3000, 3000);
+        self.y = self.y.clamp(-3000, 3000);
+        self.width = self.width.clamp(24, 1200);
+        self.height = self.height.clamp(14, 700);
+        self.scale = self.scale.clamp(0.2, 2.5);
+        self.font_scale = self.font_scale.clamp(0.35, 2.0);
+        self
+    }
+}
+
+impl Default for OverlayElementSettings {
+    fn default() -> Self {
+        Self::new(0, 0, 120, 36)
+    }
 }
 
 impl Default for OverlaySettings {
@@ -54,6 +102,10 @@ impl Default for OverlaySettings {
             opacity: 0.92,
             show_background: true,
             toggle_key: "Insert".to_string(),
+            pp_panel: OverlayElementSettings::new(0, 0, 220, 40),
+            stats_panel: OverlayElementSettings::new(0, 42, 220, 34),
+            hits_panel: OverlayElementSettings::new(0, 78, 220, 22),
+            map_panel: OverlayElementSettings::new(0, 104, 360, 24),
         }
     }
 }
@@ -70,6 +122,10 @@ impl OverlaySettings {
         self.corner_radius = self.corner_radius.min(32);
         self.opacity = self.opacity.clamp(0.05, 1.0);
         self.toggle_key = normalize_toggle_key(&self.toggle_key);
+        self.pp_panel = self.pp_panel.normalized();
+        self.stats_panel = self.stats_panel.normalized();
+        self.hits_panel = self.hits_panel.normalized();
+        self.map_panel = self.map_panel.normalized();
         self
     }
 }
