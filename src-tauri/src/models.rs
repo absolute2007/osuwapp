@@ -30,6 +30,8 @@ pub struct OverlaySettings {
     pub opacity: f64,
     pub show_background: bool,
     pub toggle_key: String,
+    pub editor_panel_width: u32,
+    pub editor_panel_height: u32,
     pub pp_panel: OverlayElementSettings,
     pub stats_panel: OverlayElementSettings,
     pub hits_panel: OverlayElementSettings,
@@ -102,6 +104,8 @@ impl Default for OverlaySettings {
             opacity: 0.92,
             show_background: true,
             toggle_key: "Insert".to_string(),
+            editor_panel_width: 760,
+            editor_panel_height: 520,
             pp_panel: OverlayElementSettings::new(0, 0, 220, 40),
             stats_panel: OverlayElementSettings::new(0, 42, 220, 34),
             hits_panel: OverlayElementSettings::new(0, 78, 220, 22),
@@ -122,6 +126,8 @@ impl OverlaySettings {
         self.corner_radius = self.corner_radius.min(32);
         self.opacity = self.opacity.clamp(0.05, 1.0);
         self.toggle_key = normalize_toggle_key(&self.toggle_key);
+        self.editor_panel_width = self.editor_panel_width.clamp(760, 1100);
+        self.editor_panel_height = self.editor_panel_height.clamp(520, 760);
         self.pp_panel = self.pp_panel.normalized();
         self.stats_panel = self.stats_panel.normalized();
         self.hits_panel = self.hits_panel.normalized();

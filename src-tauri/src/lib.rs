@@ -29,6 +29,38 @@ struct AppRuntimeState {
     latest_snapshot: Arc<Mutex<Option<AppSnapshot>>>,
 }
 
+#[cfg(target_os = "windows")]
+fn ensure_single_instance() -> bool {
+    use std::sync::OnceLock;
+    use windows::{
+        core::w,
+        Win32::{
+            Foundation::{GetLastError, HANDLE, ERROR_ALREADY_EXISTS},
+            System::Threading::CreateMutexW,
+        },
+    };
+
+    static INSTANCE_MUTEX: OnceLock<Option<isize>> = OnceLock::new();
+
+    INSTANCE_MUTEX
+        .get_or_init(|| unsafe {
+            let handle = CreateMutexW(None, true, w!("Global\\com.dundut.osuwapp.instance")).ok();
+            let already_running = GetLastError() == ERROR_ALREADY_EXISTS;
+
+            if already_running {
+                None
+            } else {
+                handle.map(|handle: HANDLE| handle.0 as isize)
+            }
+        })
+        .is_some()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ensure_single_instance() -> bool {
+    true
+}
+
 impl Default for AppRuntimeState {
     fn default() -> Self {
         Self {
@@ -42,7 +74,19 @@ impl Default for AppRuntimeState {
 }
 
 #[tauri::command]
-fn get_initial_snapshot(app: AppHandle) -> AppSnapshot {
+fn get_initial_snapshot(
+    app: AppHandle,
+    runtime_state: State<'_, AppRuntimeState>,
+) -> AppSnapshot {
+    if let Some(snapshot) = runtime_state
+        .latest_snapshot
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+    {
+        return snapshot;
+    }
+
     mock::searching_snapshot_with_recent(
         "Looking for osu!.exe (stable) and preparing live PP.",
         storage::load_recent_plays(&app),
@@ -228,6 +272,10 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if !ensure_single_instance() {
+        return;
+    }
+
     tauri::Builder::default()
         .manage(AppRuntimeState::default())
         .setup(|app| {
@@ -254,6 +302,8 @@ pub fn run() {
                 runtime_state.latest_snapshot.clone(),
                 runtime_state.overlay_manager_running.clone(),
             );
+
+            let _ = start_live_updates(app.handle().clone(), runtime_state);
 
             Ok(())
         })

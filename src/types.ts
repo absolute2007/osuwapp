@@ -31,6 +31,8 @@ export interface OverlaySettings {
   opacity: number
   showBackground: boolean
   toggleKey: string
+  editorPanelWidth: number
+  editorPanelHeight: number
   ppPanel: OverlayElementSettings
   statsPanel: OverlayElementSettings
   hitsPanel: OverlayElementSettings

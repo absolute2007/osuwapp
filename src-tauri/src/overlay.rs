@@ -95,10 +95,6 @@ fn sync_overlay_window(
 ) {
     #[cfg(target_os = "windows")]
     {
-        use std::sync::{Mutex, OnceLock};
-
-        static LAST_TARGET_RECT: OnceLock<Mutex<Option<windows::Rect>>> = OnceLock::new();
-
         if !settings.enabled {
             hide_overlay(app);
             return;
@@ -143,36 +139,22 @@ fn sync_overlay_window(
 
         if target.is_minimized {
             hide_overlay(app);
+            windows::stop_ingame_overlay();
+            return;
+        }
+
+        if !target.is_foreground {
+            hide_overlay(app);
+            windows::stop_ingame_overlay();
             return;
         }
 
         windows::stop_ingame_overlay();
 
-        if !target.is_foreground {
-            hide_overlay(app);
-            return;
-        }
-
-        let last_target_rect = LAST_TARGET_RECT.get_or_init(|| Mutex::new(None));
-        let mut last_target_rect_guard = match last_target_rect.lock() {
-            Ok(guard) => guard,
-            Err(_) => return,
-        };
-
-        let target_for_layout = if target.rect.is_valid() {
-            *last_target_rect_guard = Some(target.rect);
-            target.rect
-        } else if let Some(previous_rect) = *last_target_rect_guard {
-            previous_rect
-        } else {
-            hide_overlay(app);
-            return;
-        };
-
         let overlay_width = settings.width;
         let overlay_height = settings.height;
-        let x = target_for_layout.left.saturating_add(settings.offset_x);
-        let y = target_for_layout.top.saturating_add(settings.offset_y);
+        let x = target.rect.left.saturating_add(settings.offset_x);
+        let y = target.rect.top.saturating_add(settings.offset_y);
 
         let Ok(window) = ensure_overlay_window(app) else {
             return;
@@ -183,15 +165,14 @@ fn sync_overlay_window(
             overlay_height,
         )));
         let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
-        let _ = windows::position_overlay_window(
+        let _ = windows::position_capture_overlay_window(
             &window,
-            target.hwnd,
             x,
             y,
             overlay_width,
             overlay_height,
-            false,
         );
+        let _ = window.show();
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -200,27 +181,6 @@ fn sync_overlay_window(
         let _ = settings_store;
         let _ = settings;
     }
-}
-
-#[cfg(target_os = "windows")]
-fn resolve_asdf_overlay_dir(app: &AppHandle) -> Option<PathBuf> {
-    let resource_dir = app.path().resource_dir().ok();
-    let candidates = [
-        resource_dir
-            .as_ref()
-            .map(|dir| dir.join("resources").join("asdf-overlay")),
-        std::env::current_dir()
-            .ok()
-            .map(|dir| dir.join("src-tauri").join("resources").join("asdf-overlay")),
-        std::env::current_dir()
-            .ok()
-            .map(|dir| dir.join("resources").join("asdf-overlay")),
-    ];
-
-    candidates
-        .into_iter()
-        .flatten()
-        .find(|dir| dir.join("asdf_overlay-x64.dll").exists())
 }
 
 fn hide_overlay(app: &AppHandle) {
@@ -258,9 +218,30 @@ pub fn hide_overlay_windows(app: &AppHandle) {
     hide_overlay(app);
 }
 
+#[cfg(target_os = "windows")]
+fn resolve_asdf_overlay_dir(app: &AppHandle) -> Option<PathBuf> {
+    let resource_dir = app.path().resource_dir().ok();
+    let candidates = [
+        resource_dir
+            .as_ref()
+            .map(|dir| dir.join("resources").join("asdf-overlay")),
+        std::env::current_dir()
+            .ok()
+            .map(|dir| dir.join("src-tauri").join("resources").join("asdf-overlay")),
+        std::env::current_dir()
+            .ok()
+            .map(|dir| dir.join("resources").join("asdf-overlay")),
+    ];
+
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|dir| dir.join("asdf_overlay-x64.dll").exists())
+}
+
 fn ensure_overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     if let Some(window) = app.get_webview_window(OVERLAY_LABEL) {
-        configure_overlay_window(&window, false)?;
+        configure_overlay_window(&window)?;
         return Ok(window);
     }
 
@@ -270,9 +251,8 @@ fn ensure_overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         WebviewUrl::App("index.html?overlay=1".into()),
     )
     .decorations(false)
-    .transparent(true)
+    .transparent(false)
     .resizable(false)
-    .skip_taskbar(true)
     .focused(false)
     .visible(false)
     .shadow(false)
@@ -280,29 +260,30 @@ fn ensure_overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     .build()
     .map_err(|error| error.to_string())?;
 
-    configure_overlay_window(&window, false)?;
+    configure_overlay_window(&window)?;
 
     Ok(window)
 }
 
-fn configure_overlay_window(window: &WebviewWindow, interactive: bool) -> Result<(), String> {
+fn configure_overlay_window(window: &WebviewWindow) -> Result<(), String> {
     window
-        .set_always_on_top(false)
+        .set_always_on_top(true)
         .map_err(|error| error.to_string())?;
     window
-        .set_focusable(interactive)
+        .set_focusable(false)
         .map_err(|error| error.to_string())?;
     window
-        .set_ignore_cursor_events(!interactive)
+        .set_ignore_cursor_events(true)
         .map_err(|error| error.to_string())?;
 
     #[cfg(target_os = "windows")]
-    windows::configure_native_overlay(window, interactive)?;
+    windows::configure_capture_overlay(window)?;
 
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 mod windows {
     use std::{
         fs,
@@ -351,11 +332,11 @@ mod windows {
                 WindowsAndMessaging::{
                     EnumWindows, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
                     GetWindowThreadProcessId, IsIconic, IsWindowVisible, SetForegroundWindow,
-                    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_HWNDPARENT, GWL_EXSTYLE,
-                    HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
-                    SWP_NOSENDCHANGING, SWP_NOSIZE, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE,
-                    WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-                    WS_EX_TRANSPARENT,
+                    SetWindowDisplayAffinity, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+                    GWLP_HWNDPARENT, GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE,
+                    SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSENDCHANGING, SWP_NOSIZE, SW_HIDE,
+                    SW_SHOW, SW_SHOWNOACTIVATE, WDA_NONE, WS_EX_APPWINDOW, WS_EX_LAYERED,
+                    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
                 },
             },
         },
@@ -367,13 +348,13 @@ mod windows {
     #[derive(Clone, Copy)]
     pub struct OsuWindowTarget {
         pub pid: u32,
-        pub hwnd: HWND,
         pub rect: Rect,
         pub is_minimized: bool,
         pub is_foreground: bool,
         pub is_fullscreen_surface: bool,
     }
 
+    #[allow(dead_code)]
     #[derive(Clone, Copy)]
     pub struct Rect {
         pub left: i32,
@@ -382,6 +363,7 @@ mod windows {
         pub bottom: i32,
     }
 
+    #[allow(dead_code)]
     impl Rect {
         pub fn width(&self) -> i32 {
             self.right - self.left
@@ -444,7 +426,6 @@ mod windows {
 
         Some(OsuWindowTarget {
             pid: process.pid,
-            hwnd,
             rect: Rect {
                 left: rect.left,
                 top: rect.top,
@@ -485,84 +466,6 @@ mod windows {
         false
     }
 
-    pub fn configure_native_overlay(
-        window: &WebviewWindow,
-        interactive: bool,
-    ) -> Result<(), String> {
-        let hwnd = window.hwnd().map_err(|error| error.to_string())?;
-
-        unsafe {
-            let current_ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-            let cleared_ex_style =
-                current_ex_style & !WS_EX_APPWINDOW.0 & !WS_EX_TRANSPARENT.0 & !WS_EX_NOACTIVATE.0;
-
-            let next_ex_style = if interactive {
-                cleared_ex_style | WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0
-            } else {
-                cleared_ex_style
-                    | WS_EX_LAYERED.0
-                    | WS_EX_TOOLWINDOW.0
-                    | WS_EX_TRANSPARENT.0
-                    | WS_EX_NOACTIVATE.0
-            };
-
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next_ex_style as isize);
-        }
-
-        Ok(())
-    }
-
-    pub fn position_overlay_window(
-        window: &WebviewWindow,
-        target_hwnd: HWND,
-        x: i32,
-        y: i32,
-        width: u32,
-        height: u32,
-        interactive: bool,
-    ) -> Result<(), String> {
-        let hwnd = window.hwnd().map_err(|error| error.to_string())?;
-
-        unsafe {
-            let _ = SetWindowLongPtrW(
-                hwnd,
-                GWLP_HWNDPARENT,
-                if interactive {
-                    0
-                } else {
-                    target_hwnd.0 as isize
-                },
-            );
-            let _ = ShowWindow(
-                hwnd,
-                if interactive {
-                    SW_SHOW
-                } else {
-                    SW_SHOWNOACTIVATE
-                },
-            );
-            let _ = SetWindowPos(
-                hwnd,
-                Some(HWND_TOPMOST),
-                x,
-                y,
-                width as i32,
-                height as i32,
-                if interactive {
-                    SWP_NOOWNERZORDER | SWP_NOSENDCHANGING
-                } else {
-                    SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING
-                },
-            );
-
-            if interactive {
-                let _ = SetForegroundWindow(hwnd);
-            }
-        }
-
-        Ok(())
-    }
-
     pub fn bring_window_to_front(window: &WebviewWindow) {
         let Ok(hwnd) = window.hwnd() else {
             return;
@@ -590,6 +493,52 @@ mod windows {
             );
             let _ = SetForegroundWindow(hwnd);
         }
+    }
+
+    pub fn configure_capture_overlay(window: &WebviewWindow) -> Result<(), String> {
+        let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+
+        unsafe {
+            let current_ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+            let next_ex_style = (current_ex_style
+                & !WS_EX_APPWINDOW.0
+                & !WS_EX_TOOLWINDOW.0
+                & !WS_EX_LAYERED.0
+                & !WS_EX_TRANSPARENT.0)
+                | WS_EX_NOACTIVATE.0;
+
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next_ex_style as isize);
+            let _ = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
+            let _ = SetWindowDisplayAffinity(hwnd, WDA_NONE);
+        }
+
+        Ok(())
+    }
+
+    pub fn position_capture_overlay_window(
+        window: &WebviewWindow,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), String> {
+        let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+
+        unsafe {
+            let _ = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                width as i32,
+                height as i32,
+                SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING,
+            );
+        }
+
+        Ok(())
     }
 
     pub fn hide_overlay_window(window: &WebviewWindow) -> Result<(), String> {
@@ -1043,7 +992,7 @@ mod windows {
                         return;
                     };
 
-                    let (panel_x, panel_y) = editor_panel_origin(self.window_size);
+                    let (panel_x, panel_y) = editor_panel_origin(self.window_size, settings);
                     let local_x = cursor.client.x - panel_x;
                     let local_y = cursor.client.y - panel_y;
 
@@ -1310,10 +1259,7 @@ mod windows {
         )
     }
 
-    fn render_ingame_bitmap(
-        settings: &OverlaySettings,
-        session: Option<&SessionSnapshot>,
-    ) -> Bitmap {
+    fn render_ingame_bitmap(settings: &OverlaySettings, session: Option<&SessionSnapshot>) -> Bitmap {
         let (x, y, width, height) = overlay_bounds(settings);
         let mut canvas = BitmapCanvas::new(width, height);
         draw_overlay_elements(&mut canvas, -x, -y, settings, session, false);
@@ -1345,14 +1291,33 @@ mod windows {
         editing_field: Option<EditorField>,
         edit_buffer: &str,
     ) -> Bitmap {
+        let panel_width = settings.editor_panel_width;
+        let panel_height = settings.editor_panel_height;
         let (surface_width, surface_height) = window_size.unwrap_or((1280, 720));
-        let mut canvas = BitmapCanvas::new(surface_width.max(760), surface_height.max(520));
+        let mut canvas = BitmapCanvas::new(
+            surface_width.max(panel_width),
+            surface_height.max(panel_height),
+        );
         draw_overlay_elements(&mut canvas, 0, 0, settings, session, true);
         draw_selected_element_outline(&mut canvas, settings, selected_element);
 
-        let (panel_x, panel_y) = editor_panel_origin(Some((canvas.width, canvas.height)));
-        canvas.fill_rounded_rect(panel_x, panel_y, 760, 520, 18, [14, 18, 25, 226]);
-        canvas.stroke_rounded_rect(panel_x, panel_y, 760, 520, 18, [96, 112, 138, 120]);
+        let (panel_x, panel_y) = editor_panel_origin(Some((canvas.width, canvas.height)), settings);
+        canvas.fill_rounded_rect(
+            panel_x,
+            panel_y,
+            panel_width as i32,
+            panel_height as i32,
+            18,
+            [14, 18, 25, 226],
+        );
+        canvas.stroke_rounded_rect(
+            panel_x,
+            panel_y,
+            panel_width as i32,
+            panel_height as i32,
+            18,
+            [96, 112, 138, 120],
+        );
         canvas.draw_text_clipped(
             panel_x + 26,
             panel_y + 22,
@@ -1555,11 +1520,11 @@ mod windows {
         canvas.into_bitmap()
     }
 
-    fn editor_panel_origin(window_size: Option<(u32, u32)>) -> (i32, i32) {
+    fn editor_panel_origin(window_size: Option<(u32, u32)>, settings: &OverlaySettings) -> (i32, i32) {
         let (width, height) = window_size.unwrap_or((1280, 720));
         (
-            ((width as i32 - 760) / 2).max(0),
-            ((height as i32 - 520) / 2).max(0),
+            ((width as i32 - settings.editor_panel_width as i32) / 2).max(0),
+            ((height as i32 - settings.editor_panel_height as i32) / 2).max(0),
         )
     }
 

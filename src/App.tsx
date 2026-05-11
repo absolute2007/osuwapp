@@ -48,6 +48,8 @@ const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
   opacity: 0.92,
   showBackground: true,
   toggleKey: 'Insert',
+  editorPanelWidth: 760,
+  editorPanelHeight: 520,
   ppPanel: { enabled: true, showBackground: true, x: 0, y: 0, width: 220, height: 40, scale: 1, fontScale: 1 },
   statsPanel: { enabled: true, showBackground: true, x: 0, y: 42, width: 220, height: 34, scale: 1, fontScale: 1 },
   hitsPanel: { enabled: true, showBackground: true, x: 0, y: 78, width: 220, height: 22, scale: 1, fontScale: 1 },
@@ -147,47 +149,6 @@ const pageTitleForView = (view: AppView) => {
       return 'Settings'
     case 'about':
       return 'About'
-  }
-}
-
-const normalizeToggleKey = (key: string) => {
-  if (/^F([1-9]|1[0-2])$/i.test(key)) {
-    return key.toUpperCase()
-  }
-
-  switch (key) {
-    case ' ':
-      return 'Space'
-    case 'ArrowUp':
-      return 'Up'
-    case 'ArrowDown':
-      return 'Down'
-    case 'ArrowLeft':
-      return 'Left'
-    case 'ArrowRight':
-      return 'Right'
-    case 'PageUp':
-      return 'PageUp'
-    case 'PageDown':
-      return 'PageDown'
-    case 'Delete':
-      return 'Delete'
-    case 'Insert':
-      return 'Insert'
-    case 'Home':
-      return 'Home'
-    case 'End':
-      return 'End'
-    case 'Tab':
-      return 'Tab'
-    case 'Enter':
-      return 'Enter'
-    default:
-      if (/^[a-z0-9]$/i.test(key)) {
-        return key.toUpperCase()
-      }
-
-      return ''
   }
 }
 
@@ -677,15 +638,10 @@ function App() {
 
           {activeView === 'overlay' ? (
             <OverlayView
-              alwaysOnTop={alwaysOnTop}
               settings={overlaySettings}
-              onToggleAlwaysOnTop={() => {
-                void handleWindowAction('toggleAlwaysOnTop')
-              }}
               onUpdateSettings={(nextSettings) => {
                 void persistOverlaySettings(nextSettings)
               }}
-              session={session}
             />
           ) : null}
 
@@ -1348,17 +1304,11 @@ function RecentHistoryView({ recentPlays }: { recentPlays: RecentPlaySnapshot[] 
 }
 
 function OverlayView({
-  alwaysOnTop,
   settings,
-  onToggleAlwaysOnTop,
   onUpdateSettings,
-  session,
 }: {
-  alwaysOnTop: boolean
   settings: OverlaySettings
-  onToggleAlwaysOnTop: () => void
   onUpdateSettings: (settings: OverlaySettings) => void
-  session: SessionSnapshot | null
 }) {
   const updateSetting = <K extends keyof OverlaySettings>(key: K, value: OverlaySettings[K]) => {
     onUpdateSettings({
@@ -1368,7 +1318,7 @@ function OverlayView({
   }
 
   const updateNumericSetting = (
-    key: 'width' | 'height' | 'offsetX' | 'offsetY' | 'padding' | 'cornerRadius',
+    key: 'editorPanelWidth' | 'editorPanelHeight',
     value: string,
   ) => {
     const nextValue = Number(value)
@@ -1380,262 +1330,72 @@ function OverlayView({
     updateSetting(key, nextValue)
   }
 
+  const resetOverlaySettings = () => {
+    onUpdateSettings(DEFAULT_OVERLAY_SETTINGS)
+  }
+
   return (
-    <section className="page-shell page-shell--single">
+    <section className="page-shell page-shell--single overlay-settings-page">
       <header className="page-header">
         <h1>Overlay</h1>
       </header>
 
-      <section className="panel panel--stacked">
-        <div className="settings-row">
-          <div>
-            <strong>Overlay enabled</strong>
+      <section className="overlay-settings-grid">
+        <article className="overlay-settings-card overlay-settings-card--primary">
+          <div className="overlay-settings-card__copy">
+            <span className="overlay-settings-card__eyebrow">Overlay status</span>
+            <strong>{settings.enabled ? 'Enabled' : 'Disabled'}</strong>
+            <p>Turns the in-game HUD on or off.</p>
           </div>
           <button
-            className="toggle-button"
+            className={`toggle-button ${settings.enabled ? 'toggle-button--active' : ''}`}
             type="button"
             onClick={() => updateSetting('enabled', !settings.enabled)}
           >
-            {settings.enabled ? 'Enabled' : 'Enable'}
+            {settings.enabled ? 'Enabled' : 'Disabled'}
           </button>
-        </div>
+        </article>
 
-        <div className="settings-row">
-          <div>
-            <strong>In-game editor</strong>
+        <article className="overlay-settings-card">
+          <div className="overlay-settings-card__copy">
+            <span className="overlay-settings-card__eyebrow">In-game settings panel</span>
+            <strong>Editor window size</strong>
+            <p>Controls the settings panel shown inside osu!.</p>
           </div>
-          <span className="settings-value">{settings.toggleKey}</span>
-        </div>
-
-        <div className="settings-row">
-          <div>
-            <strong>Overlay toggle key</strong>
-          </div>
-          <label className="number-field settings-field">
-            <span>Key</span>
-            <input
-              type="text"
-              value={settings.toggleKey}
-              readOnly
-              onKeyDown={(event) => {
-                event.preventDefault()
-                event.stopPropagation()
-
-                const nextKey = normalizeToggleKey(event.key)
-
-                if (nextKey) {
-                  updateSetting('toggleKey', nextKey)
-                }
-              }}
-            />
-          </label>
-        </div>
-
-        <div className="settings-row">
-          <div>
-            <strong>Main window always on top</strong>
-          </div>
-          <button className="toggle-button" type="button" onClick={onToggleAlwaysOnTop}>
-            {alwaysOnTop ? 'Enabled' : 'Enable'}
-          </button>
-        </div>
-
-        <div className="settings-row">
-          <div>
-            <strong>Overlay opacity</strong>
-          </div>
-          <div className="slider-control">
-            <input
-              max={100}
-              min={5}
-              step={1}
-              type="range"
-              value={Math.round(settings.opacity * 100)}
-              onChange={(event) => updateSetting('opacity', Number(event.target.value) / 100)}
-            />
-            <span className="settings-value">{Math.round(settings.opacity * 100)}%</span>
-          </div>
-        </div>
-
-        <div className="settings-row">
-          <div>
-            <strong>Overlay scaling</strong>
-          </div>
-          <div className="slider-control">
-            <input
-              max={250}
-              min={15}
-              step={1}
-              type="range"
-              value={Math.round(settings.scale * 100)}
-              onChange={(event) => updateSetting('scale', Number(event.target.value) / 100)}
-            />
-            <span className="settings-value">{Math.round(settings.scale * 100)}%</span>
-          </div>
-        </div>
-
-        <div className="settings-row">
-          <div>
-            <strong>Text scale</strong>
-          </div>
-          <div className="slider-control">
-            <input
-              max={180}
-              min={45}
-              step={1}
-              type="range"
-              value={Math.round(settings.fontScale * 100)}
-              onChange={(event) => updateSetting('fontScale', Number(event.target.value) / 100)}
-            />
-            <span className="settings-value">{Math.round(settings.fontScale * 100)}%</span>
-          </div>
-        </div>
-
-        <div className="settings-row">
-          <div>
-            <strong>Overlay position</strong>
-          </div>
-          <div className="number-grid">
-            <label className="number-field">
-              <span>X</span>
-              <input
-                type="number"
-                value={settings.offsetX}
-                onChange={(event) => updateNumericSetting('offsetX', event.target.value)}
-              />
-            </label>
-            <label className="number-field">
-              <span>Y</span>
-              <input
-                type="number"
-                value={settings.offsetY}
-                onChange={(event) => updateNumericSetting('offsetY', event.target.value)}
-              />
-            </label>
-          </div>
-        </div>
-
-        <div className="settings-row">
-          <div>
-            <strong>Overlay size</strong>
-          </div>
-          <div className="number-grid">
+          <div className="number-grid overlay-settings-card__fields">
             <label className="number-field">
               <span>Width</span>
               <input
+                max={1100}
+                min={760}
                 type="number"
-                value={settings.width}
-                onChange={(event) => updateNumericSetting('width', event.target.value)}
+                value={settings.editorPanelWidth}
+                onChange={(event) => updateNumericSetting('editorPanelWidth', event.target.value)}
               />
             </label>
             <label className="number-field">
               <span>Height</span>
               <input
+                max={760}
+                min={520}
                 type="number"
-                value={settings.height}
-                onChange={(event) => updateNumericSetting('height', event.target.value)}
+                value={settings.editorPanelHeight}
+                onChange={(event) => updateNumericSetting('editorPanelHeight', event.target.value)}
               />
             </label>
           </div>
-        </div>
+        </article>
 
-        <div className="settings-row settings-row--stacked">
-          <div>
-            <strong>Shape</strong>
+        <article className="overlay-settings-card overlay-settings-card--reset">
+          <div className="overlay-settings-card__copy">
+            <span className="overlay-settings-card__eyebrow">Defaults</span>
+            <strong>Reset overlay settings</strong>
+            <p>Restores the HUD, in-game editor and hotkey settings.</p>
           </div>
-          <div className="number-grid">
-            <label className="number-field">
-              <span>Padding</span>
-              <input
-                min={0}
-                type="number"
-                value={settings.padding}
-                onChange={(event) => updateNumericSetting('padding', event.target.value)}
-              />
-            </label>
-            <label className="number-field">
-              <span>Radius</span>
-              <input
-                min={0}
-                type="number"
-                value={settings.cornerRadius}
-                onChange={(event) => updateNumericSetting('cornerRadius', event.target.value)}
-              />
-            </label>
-          </div>
-          <button
-            className="toggle-button"
-            type="button"
-            onClick={() => updateSetting('showBackground', !settings.showBackground)}
-          >
-            {settings.showBackground ? 'Background on' : 'Background off'}
+          <button className="reset-button" type="button" onClick={resetOverlaySettings}>
+            Reset
           </button>
-        </div>
-
-        <div className="settings-row settings-row--stacked">
-          <div>
-            <strong>Visible metrics</strong>
-          </div>
-          <div className="metric-toggle-grid">
-            <button
-              className={`metric-toggle ${settings.showPp ? 'metric-toggle--active' : ''}`}
-              type="button"
-              onClick={() => updateSetting('showPp', !settings.showPp)}
-            >
-              PP
-            </button>
-            <button
-              className={`metric-toggle ${settings.showIfFc ? 'metric-toggle--active' : ''}`}
-              type="button"
-              onClick={() => updateSetting('showIfFc', !settings.showIfFc)}
-            >
-              If FC
-            </button>
-            <button
-              className={`metric-toggle ${settings.showAccuracy ? 'metric-toggle--active' : ''}`}
-              type="button"
-              onClick={() => updateSetting('showAccuracy', !settings.showAccuracy)}
-            >
-              Accuracy
-            </button>
-            <button
-              className={`metric-toggle ${settings.showCombo ? 'metric-toggle--active' : ''}`}
-              type="button"
-              onClick={() => updateSetting('showCombo', !settings.showCombo)}
-            >
-              Combo
-            </button>
-            <button
-              className={`metric-toggle ${settings.showMods ? 'metric-toggle--active' : ''}`}
-              type="button"
-              onClick={() => updateSetting('showMods', !settings.showMods)}
-            >
-              Mods
-            </button>
-            <button
-              className={`metric-toggle ${settings.showMap ? 'metric-toggle--active' : ''}`}
-              type="button"
-              onClick={() => updateSetting('showMap', !settings.showMap)}
-            >
-              Map
-            </button>
-            <button
-              className={`metric-toggle ${settings.showHits ? 'metric-toggle--active' : ''}`}
-              type="button"
-              onClick={() => updateSetting('showHits', !settings.showHits)}
-            >
-              Hit counts
-            </button>
-          </div>
-        </div>
-
-        <div className="settings-row">
-          <div>
-            <strong>Current source</strong>
-            <span className="settings-value">{session ? session.live.gameState : 'Idle'}</span>
-          </div>
-          <span className="settings-value">{session ? session.live.modsText : 'Idle'}</span>
-        </div>
+        </article>
       </section>
     </section>
   )

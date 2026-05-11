@@ -314,6 +314,7 @@ fn build_snapshot(
                         &beatmap_info,
                         &beatmap_path,
                     )?;
+                    *last_known_session = Some(session.clone());
 
                     return Ok(AppSnapshot {
                         connection: ConnectionSnapshot {
@@ -329,6 +330,12 @@ fn build_snapshot(
                     });
                 }
             }
+
+            if let Some(snapshot) =
+                snapshot_from_last_known_session(game_state, last_known_session, recent_plays)
+            {
+                return Ok(snapshot);
+            }
         }
 
         return Ok(connected_idle_snapshot(game_state, recent_plays));
@@ -337,32 +344,11 @@ fn build_snapshot(
     let (beatmap_info, beatmap_path) = match read_beatmap_context(process, state, game_state) {
         Ok(context) => context,
         Err(error) => {
-            if matches!(game_state, GameState::MainMenu | GameState::Editor) {
-                if let Some(mut session) = last_known_session.clone() {
-                    session.phase = SessionPhase::Preview;
-                    session.live.game_state = format_game_state(game_state);
-                    session.live.accuracy = None;
-                    session.live.combo = 0;
-                    session.live.score = 0;
-                    session.live.hp = None;
-                    session.live.progress = 0.0;
-                    session.live.hits = empty_hits();
-                    session.pp.current = session.pp.full_map;
-                    session.pp.if_fc = session.pp.full_map;
-
-                    return Ok(AppSnapshot {
-                        connection: ConnectionSnapshot {
-                            status: ConnectionStatus::Connected,
-                            detail: format!(
-                                "Connected to osu!.exe · stable reader · {}",
-                                format_game_state(game_state)
-                            ),
-                            updated_at_ms: mock::now_ms(),
-                        },
-                        session: Some(session),
-                        recent_plays: recent_plays.to_vec(),
-                    });
-                }
+            if let Some(snapshot) =
+                snapshot_from_last_known_session(game_state, last_known_session, recent_plays)
+            {
+                log::warn!("Using last known osu! session after beatmap read failed: {error}");
+                return Ok(snapshot);
             }
 
             return Err(error);
@@ -407,6 +393,41 @@ fn build_snapshot(
     *last_known_session = Some(session.clone());
 
     Ok(AppSnapshot {
+        connection: ConnectionSnapshot {
+            status: ConnectionStatus::Connected,
+            detail: format!(
+                "Connected to osu!.exe · stable reader · {}",
+                format_game_state(game_state)
+            ),
+            updated_at_ms: mock::now_ms(),
+        },
+        session: Some(session),
+        recent_plays: recent_plays.to_vec(),
+    })
+}
+
+fn snapshot_from_last_known_session(
+    game_state: GameState,
+    last_known_session: &Option<SessionSnapshot>,
+    recent_plays: &[RecentPlaySnapshot],
+) -> Option<AppSnapshot> {
+    let mut session = last_known_session.clone()?;
+
+    if matches!(game_state, GameState::MainMenu | GameState::Editor) {
+        session.phase = SessionPhase::Preview;
+        session.live.accuracy = None;
+        session.live.combo = 0;
+        session.live.score = 0;
+        session.live.hp = None;
+        session.live.progress = 0.0;
+        session.live.hits = empty_hits();
+        session.pp.current = session.pp.full_map;
+        session.pp.if_fc = session.pp.full_map;
+    }
+
+    session.live.game_state = format_game_state(game_state);
+
+    Some(AppSnapshot {
         connection: ConnectionSnapshot {
             status: ConnectionStatus::Connected,
             detail: format!(

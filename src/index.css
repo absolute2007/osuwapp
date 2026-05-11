@@ -43,14 +43,14 @@ body {
 }
 
 body[data-overlay-mode='true'] {
-  background: transparent;
+  background: #111318;
   overflow: hidden;
 }
 
 html[data-overlay-mode='true'],
 html[data-overlay-mode='true'] body,
 html[data-overlay-mode='true'] #root {
-  background: transparent !important;
+  background: #111318 !important;
 }
 
 html[data-overlay-mode='true'] #root {
