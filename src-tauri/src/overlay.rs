@@ -16,9 +16,10 @@ use tauri::{
 use crate::models::{AppSnapshot, OverlaySettings};
 
 const OVERLAY_LABEL: &str = "overlay";
-const OVERLAY_POLL_MS: u64 = 12;
 const DEFAULT_OVERLAY_WIDTH: f64 = 420.0;
 const DEFAULT_OVERLAY_HEIGHT: f64 = 248.0;
+const BASE_EDITOR_PANEL_WIDTH: f64 = 760.0;
+const BASE_EDITOR_PANEL_HEIGHT: f64 = 520.0;
 #[cfg(target_os = "windows")]
 const OPEN_OVERLAY_SETTINGS_EVENT: &str = "open-overlay-settings";
 
@@ -34,14 +35,15 @@ pub fn spawn_overlay_manager(
             break;
         }
 
+        let current_settings = settings
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+            .normalized();
+        let poll_interval_ms = current_settings.data_update_interval_ms;
+
         #[cfg(target_os = "windows")]
         {
-            let current_settings = settings
-                .lock()
-                .map(|guard| guard.clone())
-                .unwrap_or_default()
-                .normalized();
-
             let osu_target = windows::find_osu_target();
             let settings_hotkey_pressed =
                 windows::poll_overlay_settings_hotkey(&current_settings, osu_target.as_ref());
@@ -66,12 +68,6 @@ pub fn spawn_overlay_manager(
 
         #[cfg(not(target_os = "windows"))]
         {
-            let current_settings = settings
-                .lock()
-                .map(|guard| guard.clone())
-                .unwrap_or_default()
-                .normalized();
-
             sync_overlay_window(
                 &app,
                 &settings,
@@ -81,7 +77,7 @@ pub fn spawn_overlay_manager(
                 false,
             );
         }
-        thread::sleep(Duration::from_millis(OVERLAY_POLL_MS));
+        thread::sleep(Duration::from_millis(poll_interval_ms));
     });
 }
 
@@ -165,13 +161,8 @@ fn sync_overlay_window(
             overlay_height,
         )));
         let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
-        let _ = windows::position_capture_overlay_window(
-            &window,
-            x,
-            y,
-            overlay_width,
-            overlay_height,
-        );
+        let _ =
+            windows::position_capture_overlay_window(&window, x, y, overlay_width, overlay_height);
         let _ = window.show();
     }
 
@@ -993,8 +984,9 @@ mod windows {
                     };
 
                     let (panel_x, panel_y) = editor_panel_origin(self.window_size, settings);
-                    let local_x = cursor.client.x - panel_x;
-                    let local_y = cursor.client.y - panel_y;
+                    let scale = EditorPanelScale::from_settings(settings);
+                    let (local_x, local_y) =
+                        scale.base_point(cursor.client.x - panel_x, cursor.client.y - panel_y);
 
                     match cursor.event {
                         CursorEvent::Action {
@@ -1169,6 +1161,48 @@ mod windows {
         data: Vec<u8>,
     }
 
+    #[derive(Clone, Copy)]
+    struct EditorPanelScale {
+        x: f64,
+        y: f64,
+    }
+
+    impl EditorPanelScale {
+        fn from_settings(settings: &OverlaySettings) -> Self {
+            Self {
+                x: settings.editor_panel_width as f64 / super::BASE_EDITOR_PANEL_WIDTH,
+                y: settings.editor_panel_height as f64 / super::BASE_EDITOR_PANEL_HEIGHT,
+            }
+        }
+
+        fn x(&self, value: i32) -> i32 {
+            (value as f64 * self.x).round() as i32
+        }
+
+        fn y(&self, value: i32) -> i32 {
+            (value as f64 * self.y).round() as i32
+        }
+
+        fn w(&self, value: i32) -> i32 {
+            self.x(value).max(1)
+        }
+
+        fn h(&self, value: i32) -> i32 {
+            self.y(value).max(1)
+        }
+
+        fn font(&self, value: i32) -> i32 {
+            (value as f64 * self.x.min(self.y)).round().max(8.0) as i32
+        }
+
+        fn base_point(&self, x: i32, y: i32) -> (i32, i32) {
+            (
+                (x as f64 / self.x).round() as i32,
+                (y as f64 / self.y).round() as i32,
+            )
+        }
+    }
+
     #[allow(dead_code)]
     struct HudLayout {
         width: u32,
@@ -1200,7 +1234,7 @@ mod windows {
 
     fn ingame_frame_key(settings: &OverlaySettings, session: Option<&SessionSnapshot>) -> String {
         let mut key = format!(
-            "{}:{}:{}:{}:{}:{}:{}:{:.3}:{:.3}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{:?}:{:?}:{:?}:{:?}",
+            "{}:{}:{}:{}:{}:{}:{}:{:.3}:{:.3}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{:?}:{:?}:{:?}:{:?}",
             settings.enabled,
             settings.width,
             settings.height,
@@ -1219,6 +1253,8 @@ mod windows {
             settings.show_mods,
             settings.show_map,
             settings.show_hits,
+            settings.editor_panel_width,
+            settings.editor_panel_height,
             element_key(&settings.pp_panel),
             element_key(&settings.stats_panel),
             element_key(&settings.hits_panel),
@@ -1259,7 +1295,10 @@ mod windows {
         )
     }
 
-    fn render_ingame_bitmap(settings: &OverlaySettings, session: Option<&SessionSnapshot>) -> Bitmap {
+    fn render_ingame_bitmap(
+        settings: &OverlaySettings,
+        session: Option<&SessionSnapshot>,
+    ) -> Bitmap {
         let (x, y, width, height) = overlay_bounds(settings);
         let mut canvas = BitmapCanvas::new(width, height);
         draw_overlay_elements(&mut canvas, -x, -y, settings, session, false);
@@ -1302,6 +1341,7 @@ mod windows {
         draw_selected_element_outline(&mut canvas, settings, selected_element);
 
         let (panel_x, panel_y) = editor_panel_origin(Some((canvas.width, canvas.height)), settings);
+        let scale = EditorPanelScale::from_settings(settings);
         canvas.fill_rounded_rect(
             panel_x,
             panel_y,
@@ -1319,49 +1359,59 @@ mod windows {
             [96, 112, 138, 120],
         );
         canvas.draw_text_clipped(
-            panel_x + 26,
-            panel_y + 22,
-            360,
+            panel_x + scale.x(26),
+            panel_y + scale.y(22),
+            scale.w(360),
             "Overlay editor",
-            20,
+            scale.font(20),
             FontWeight::Semibold,
             [245, 248, 253, 255],
         );
         canvas.draw_text_clipped(
-            panel_x + 26,
-            panel_y + 52,
-            360,
+            panel_x + scale.x(26),
+            panel_y + scale.y(52),
+            scale.w(360),
             "End",
-            12,
+            scale.font(12),
             FontWeight::Normal,
             [150, 163, 184, 235],
         );
-        draw_editor_button(&mut canvas, panel_x + 648, panel_y + 20, 84, 32, "Close");
+        draw_editor_button(
+            &mut canvas,
+            scale,
+            panel_x,
+            panel_y,
+            648,
+            20,
+            84,
+            32,
+            "Close",
+        );
 
         canvas.draw_text_clipped(
-            panel_x + 26,
-            panel_y + 94,
-            300,
+            panel_x + scale.x(26),
+            panel_y + scale.y(94),
+            scale.w(300),
             "Live HUD",
-            15,
+            scale.font(15),
             FontWeight::Semibold,
             [234, 239, 247, 255],
         );
         canvas.draw_text_clipped(
-            panel_x + 26,
-            panel_y + 124,
-            300,
+            panel_x + scale.x(26),
+            panel_y + scale.y(124),
+            scale.w(300),
             "Drag a block. Size and scale apply to the selected block.",
-            12,
+            scale.font(12),
             FontWeight::Normal,
             [151, 164, 184, 245],
         );
         canvas.draw_text_clipped(
-            panel_x + 26,
-            panel_y + 154,
-            300,
+            panel_x + scale.x(26),
+            panel_y + scale.y(154),
+            scale.w(300),
             &format!("Selected: {}", selected_element_label(selected_element)),
-            13,
+            scale.font(13),
             FontWeight::Semibold,
             [220, 231, 246, 255],
         );
@@ -1370,22 +1420,31 @@ mod windows {
 
         draw_editor_row(
             &mut canvas,
-            panel_x + 390,
-            panel_y + 88,
+            scale,
+            panel_x,
+            panel_y,
+            390,
+            88,
             "Enabled",
             settings.enabled,
         );
         draw_editor_row(
             &mut canvas,
-            panel_x + 390,
-            panel_y + 132,
+            scale,
+            panel_x,
+            panel_y,
+            390,
+            132,
             "Background",
             active.show_background,
         );
         draw_editor_stepper(
             &mut canvas,
-            panel_x + 390,
-            panel_y + 190,
+            scale,
+            panel_x,
+            panel_y,
+            390,
+            190,
             "Opacity",
             &editor_value_text(
                 editing_field,
@@ -1396,8 +1455,11 @@ mod windows {
         );
         draw_editor_stepper(
             &mut canvas,
-            panel_x + 390,
-            panel_y + 244,
+            scale,
+            panel_x,
+            panel_y,
+            390,
+            244,
             "Scale",
             &editor_value_text(
                 editing_field,
@@ -1408,8 +1470,11 @@ mod windows {
         );
         draw_editor_stepper(
             &mut canvas,
-            panel_x + 390,
-            panel_y + 298,
+            scale,
+            panel_x,
+            panel_y,
+            390,
+            298,
             "Text",
             &editor_value_text(
                 editing_field,
@@ -1420,8 +1485,11 @@ mod windows {
         );
         draw_editor_stepper(
             &mut canvas,
-            panel_x + 26,
-            panel_y + 318,
+            scale,
+            panel_x,
+            panel_y,
+            26,
+            318,
             "X",
             &editor_value_text(
                 editing_field,
@@ -1432,8 +1500,11 @@ mod windows {
         );
         draw_editor_stepper(
             &mut canvas,
-            panel_x + 196,
-            panel_y + 318,
+            scale,
+            panel_x,
+            panel_y,
+            196,
+            318,
             "Y",
             &editor_value_text(
                 editing_field,
@@ -1444,8 +1515,11 @@ mod windows {
         );
         draw_editor_stepper(
             &mut canvas,
-            panel_x + 26,
-            panel_y + 372,
+            scale,
+            panel_x,
+            panel_y,
+            26,
+            372,
             "Width",
             &editor_value_text(
                 editing_field,
@@ -1456,8 +1530,11 @@ mod windows {
         );
         draw_editor_stepper(
             &mut canvas,
-            panel_x + 196,
-            panel_y + 372,
+            scale,
+            panel_x,
+            panel_y,
+            196,
+            372,
             "Height",
             &editor_value_text(
                 editing_field,
@@ -1469,50 +1546,71 @@ mod windows {
 
         draw_metric_toggle(
             &mut canvas,
-            panel_x + 390,
-            panel_y + 372,
+            scale,
+            panel_x,
+            panel_y,
+            390,
+            372,
             "PP",
             settings.show_pp,
         );
         draw_metric_toggle(
             &mut canvas,
-            panel_x + 472,
-            panel_y + 372,
+            scale,
+            panel_x,
+            panel_y,
+            472,
+            372,
             "IF FC",
             settings.show_if_fc,
         );
         draw_metric_toggle(
             &mut canvas,
-            panel_x + 554,
-            panel_y + 372,
+            scale,
+            panel_x,
+            panel_y,
+            554,
+            372,
             "ACC",
             settings.show_accuracy,
         );
         draw_metric_toggle(
             &mut canvas,
-            panel_x + 636,
-            panel_y + 372,
+            scale,
+            panel_x,
+            panel_y,
+            636,
+            372,
             "Hits",
             settings.show_hits,
         );
         draw_metric_toggle(
             &mut canvas,
-            panel_x + 390,
-            panel_y + 420,
+            scale,
+            panel_x,
+            panel_y,
+            390,
+            420,
             "Combo",
             settings.show_combo,
         );
         draw_metric_toggle(
             &mut canvas,
-            panel_x + 472,
-            panel_y + 420,
+            scale,
+            panel_x,
+            panel_y,
+            472,
+            420,
             "Mods",
             settings.show_mods,
         );
         draw_metric_toggle(
             &mut canvas,
-            panel_x + 554,
-            panel_y + 420,
+            scale,
+            panel_x,
+            panel_y,
+            554,
+            420,
             "Map",
             settings.show_map,
         );
@@ -1520,7 +1618,10 @@ mod windows {
         canvas.into_bitmap()
     }
 
-    fn editor_panel_origin(window_size: Option<(u32, u32)>, settings: &OverlaySettings) -> (i32, i32) {
+    fn editor_panel_origin(
+        window_size: Option<(u32, u32)>,
+        settings: &OverlaySettings,
+    ) -> (i32, i32) {
         let (width, height) = window_size.unwrap_or((1280, 720));
         (
             ((width as i32 - settings.editor_panel_width as i32) / 2).max(0),
@@ -1528,99 +1629,188 @@ mod windows {
         )
     }
 
-    fn draw_editor_button(canvas: &mut BitmapCanvas, x: i32, y: i32, w: i32, h: i32, label: &str) {
-        canvas.fill_rounded_rect(x, y, w, h, 10, [35, 41, 52, 235]);
-        canvas.stroke_rounded_rect(x, y, w, h, 10, [94, 107, 130, 130]);
+    fn draw_editor_button(
+        canvas: &mut BitmapCanvas,
+        scale: EditorPanelScale,
+        panel_x: i32,
+        panel_y: i32,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        label: &str,
+    ) {
+        let x = panel_x + scale.x(x);
+        let y = panel_y + scale.y(y);
+        let w = scale.w(w);
+        let h = scale.h(h);
+        canvas.fill_rounded_rect(x, y, w, h, scale.font(10), [35, 41, 52, 235]);
+        canvas.stroke_rounded_rect(x, y, w, h, scale.font(10), [94, 107, 130, 130]);
         canvas.draw_text_clipped(
-            x + 14,
-            y + 8,
-            w - 28,
+            x + scale.x(14),
+            y + scale.y(8),
+            w - scale.w(28),
             label,
-            13,
+            scale.font(13),
             FontWeight::Semibold,
             [234, 239, 247, 255],
         );
     }
 
-    fn draw_editor_row(canvas: &mut BitmapCanvas, x: i32, y: i32, label: &str, enabled: bool) {
+    fn draw_editor_row(
+        canvas: &mut BitmapCanvas,
+        scale: EditorPanelScale,
+        panel_x: i32,
+        panel_y: i32,
+        x: i32,
+        y: i32,
+        label: &str,
+        enabled: bool,
+    ) {
+        let x = panel_x + scale.x(x);
+        let y = panel_y + scale.y(y);
         canvas.draw_text_clipped(
             x,
-            y + 7,
-            180,
+            y + scale.y(7),
+            scale.w(180),
             label,
-            14,
+            scale.font(14),
             FontWeight::Semibold,
             [235, 240, 248, 255],
         );
-        let toggle_x = x + 238;
+        let toggle_x = x + scale.x(238);
         canvas.fill_rounded_rect(
             toggle_x,
             y,
-            44,
-            24,
-            12,
+            scale.w(44),
+            scale.h(24),
+            scale.font(12),
             if enabled {
-                [50, 101, 190, 230]
+                [42, 160, 88, 230]
             } else {
                 [40, 46, 58, 230]
             },
         );
-        canvas.stroke_rounded_rect(toggle_x, y, 44, 24, 12, [100, 116, 145, 95]);
+        canvas.stroke_rounded_rect(
+            toggle_x,
+            y,
+            scale.w(44),
+            scale.h(24),
+            scale.font(12),
+            [100, 116, 145, 95],
+        );
         canvas.fill_rounded_rect(
-            if enabled { toggle_x + 22 } else { toggle_x + 3 },
-            y + 3,
-            18,
-            18,
-            9,
+            if enabled {
+                toggle_x + scale.x(22)
+            } else {
+                toggle_x + scale.x(3)
+            },
+            y + scale.y(3),
+            scale.w(18),
+            scale.h(18),
+            scale.font(9),
             [238, 243, 250, 245],
         );
     }
 
-    fn draw_editor_stepper(canvas: &mut BitmapCanvas, x: i32, y: i32, label: &str, value: &str) {
+    fn draw_editor_stepper(
+        canvas: &mut BitmapCanvas,
+        scale: EditorPanelScale,
+        panel_x: i32,
+        panel_y: i32,
+        x: i32,
+        y: i32,
+        label: &str,
+        value: &str,
+    ) {
+        let actual_x = panel_x + scale.x(x);
+        let actual_y = panel_y + scale.y(y);
         canvas.draw_text_clipped(
-            x,
-            y,
-            120,
+            actual_x,
+            actual_y,
+            scale.w(120),
             label,
-            12,
+            scale.font(12),
             FontWeight::Semibold,
             [151, 164, 184, 245],
         );
-        draw_editor_button(canvas, x, y + 20, 34, 30, "-");
-        canvas.fill_rounded_rect(x + 42, y + 20, 76, 30, 9, [28, 34, 44, 230]);
-        canvas.stroke_rounded_rect(x + 42, y + 20, 76, 30, 9, [82, 96, 120, 115]);
+        draw_editor_button(canvas, scale, panel_x, panel_y, x, y + 20, 34, 30, "-");
+        canvas.fill_rounded_rect(
+            actual_x + scale.x(42),
+            actual_y + scale.y(20),
+            scale.w(76),
+            scale.h(30),
+            scale.font(9),
+            [28, 34, 44, 230],
+        );
+        canvas.stroke_rounded_rect(
+            actual_x + scale.x(42),
+            actual_y + scale.y(20),
+            scale.w(76),
+            scale.h(30),
+            scale.font(9),
+            [82, 96, 120, 115],
+        );
         canvas.draw_text_clipped(
-            x + 50,
-            y + 28,
-            60,
+            actual_x + scale.x(50),
+            actual_y + scale.y(28),
+            scale.w(60),
             value,
-            12,
+            scale.font(12),
             FontWeight::Semibold,
             [240, 244, 250, 255],
         );
-        draw_editor_button(canvas, x + 126, y + 20, 34, 30, "+");
+        draw_editor_button(
+            canvas,
+            scale,
+            panel_x,
+            panel_y,
+            x + 126,
+            y + 20,
+            34,
+            30,
+            "+",
+        );
     }
 
-    fn draw_metric_toggle(canvas: &mut BitmapCanvas, x: i32, y: i32, label: &str, enabled: bool) {
+    fn draw_metric_toggle(
+        canvas: &mut BitmapCanvas,
+        scale: EditorPanelScale,
+        panel_x: i32,
+        panel_y: i32,
+        x: i32,
+        y: i32,
+        label: &str,
+        enabled: bool,
+    ) {
+        let x = panel_x + scale.x(x);
+        let y = panel_y + scale.y(y);
         canvas.fill_rounded_rect(
             x,
             y,
-            72,
-            34,
-            10,
+            scale.w(72),
+            scale.h(34),
+            scale.font(10),
             if enabled {
-                [50, 101, 190, 230]
+                [42, 160, 88, 230]
             } else {
                 [32, 38, 48, 230]
             },
         );
-        canvas.stroke_rounded_rect(x, y, 72, 34, 10, [95, 113, 142, 125]);
+        canvas.stroke_rounded_rect(
+            x,
+            y,
+            scale.w(72),
+            scale.h(34),
+            scale.font(10),
+            [95, 113, 142, 125],
+        );
         canvas.draw_text_clipped(
-            x + 12,
-            y + 9,
-            48,
+            x + scale.x(12),
+            y + scale.y(9),
+            scale.w(48),
             label,
-            12,
+            scale.font(12),
             FontWeight::Semibold,
             [238, 243, 250, 255],
         );

@@ -33,18 +33,22 @@ use crate::{
     mock,
     models::{
         AppSnapshot, BeatmapSnapshot, ConnectionSnapshot, ConnectionStatus, HitSnapshot,
-        LiveSnapshot, PpComponentSnapshot, PpSnapshot, RecentPlaySnapshot, SessionPhase,
-        SessionSnapshot,
+        LiveSnapshot, OverlaySettings, PpComponentSnapshot, PpSnapshot, RecentPlaySnapshot,
+        SessionPhase, SessionSnapshot,
     },
     storage,
 };
 
 const SNAPSHOT_EVENT: &str = "session-updated";
-const POLL_INTERVAL_MS: u64 = 90;
+const DEFAULT_POLL_INTERVAL_MS: u64 = 90;
 const INIT_RETRY_MS: u64 = 100;
 const BEATMAP_PTR_OFFSET: i32 = 0xC;
 
-pub fn spawn_live_reader(app: AppHandle, latest_snapshot: Arc<Mutex<Option<AppSnapshot>>>) {
+pub fn spawn_live_reader(
+    app: AppHandle,
+    latest_snapshot: Arc<Mutex<Option<AppSnapshot>>>,
+    overlay_settings: Arc<Mutex<OverlaySettings>>,
+) {
     thread::spawn(move || {
         let mut recent_plays = storage::load_recent_plays(&app);
         emit_snapshot(
@@ -100,7 +104,7 @@ pub fn spawn_live_reader(app: AppHandle, latest_snapshot: Arc<Mutex<Option<AppSn
                         snapshot.recent_plays = recent_plays.clone();
                         emit_snapshot(&app, &latest_snapshot, snapshot);
                         consecutive_read_errors = 0;
-                        thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
+                        thread::sleep(Duration::from_millis(reader_interval_ms(&overlay_settings)));
                     }
                     Err(error) => {
                         consecutive_read_errors += 1;
@@ -128,12 +132,19 @@ pub fn spawn_live_reader(app: AppHandle, latest_snapshot: Arc<Mutex<Option<AppSn
                             break;
                         }
 
-                        thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
+                        thread::sleep(Duration::from_millis(reader_interval_ms(&overlay_settings)));
                     }
                 }
             }
         }
     });
+}
+
+fn reader_interval_ms(overlay_settings: &Arc<Mutex<OverlaySettings>>) -> u64 {
+    overlay_settings
+        .lock()
+        .map(|settings| settings.clone().normalized().data_update_interval_ms)
+        .unwrap_or(DEFAULT_POLL_INTERVAL_MS)
 }
 
 fn emit_snapshot(

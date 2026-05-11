@@ -32,6 +32,7 @@ pub struct OverlaySettings {
     pub toggle_key: String,
     pub editor_panel_width: u32,
     pub editor_panel_height: u32,
+    pub data_update_interval_ms: u64,
     pub pp_panel: OverlayElementSettings,
     pub stats_panel: OverlayElementSettings,
     pub hits_panel: OverlayElementSettings,
@@ -106,6 +107,7 @@ impl Default for OverlaySettings {
             toggle_key: "Insert".to_string(),
             editor_panel_width: 760,
             editor_panel_height: 520,
+            data_update_interval_ms: 90,
             pp_panel: OverlayElementSettings::new(0, 0, 220, 40),
             stats_panel: OverlayElementSettings::new(0, 42, 220, 34),
             hits_panel: OverlayElementSettings::new(0, 78, 220, 22),
@@ -128,6 +130,7 @@ impl OverlaySettings {
         self.toggle_key = normalize_toggle_key(&self.toggle_key);
         self.editor_panel_width = self.editor_panel_width.clamp(760, 1100);
         self.editor_panel_height = self.editor_panel_height.clamp(520, 760);
+        self.data_update_interval_ms = self.data_update_interval_ms.clamp(16, 1000);
         self.pp_panel = self.pp_panel.normalized();
         self.stats_panel = self.stats_panel.normalized();
         self.hits_panel = self.hits_panel.normalized();

@@ -50,6 +50,7 @@ const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
   toggleKey: 'Insert',
   editorPanelWidth: 760,
   editorPanelHeight: 520,
+  dataUpdateIntervalMs: 90,
   ppPanel: { enabled: true, showBackground: true, x: 0, y: 0, width: 220, height: 40, scale: 1, fontScale: 1 },
   statsPanel: { enabled: true, showBackground: true, x: 0, y: 42, width: 220, height: 34, scale: 1, fontScale: 1 },
   hitsPanel: { enabled: true, showBackground: true, x: 0, y: 78, width: 220, height: 22, scale: 1, fontScale: 1 },
@@ -1318,7 +1319,7 @@ function OverlayView({
   }
 
   const updateNumericSetting = (
-    key: 'editorPanelWidth' | 'editorPanelHeight',
+    key: 'editorPanelWidth' | 'editorPanelHeight' | 'dataUpdateIntervalMs',
     value: string,
   ) => {
     const nextValue = Number(value)
@@ -1386,6 +1387,24 @@ function OverlayView({
           </div>
         </article>
 
+        <article className="overlay-settings-card">
+          <div className="overlay-settings-card__copy">
+            <span className="overlay-settings-card__eyebrow">Overlay data</span>
+            <strong>Data update interval</strong>
+            <p>Controls how often the overlay reads and redraws live osu! data.</p>
+          </div>
+          <label className="number-field overlay-settings-card__single-field">
+            <span>Milliseconds</span>
+            <input
+              max={1000}
+              min={16}
+              type="number"
+              value={settings.dataUpdateIntervalMs}
+              onChange={(event) => updateNumericSetting('dataUpdateIntervalMs', event.target.value)}
+            />
+          </label>
+        </article>
+
         <article className="overlay-settings-card overlay-settings-card--reset">
           <div className="overlay-settings-card__copy">
             <span className="overlay-settings-card__eyebrow">Defaults</span>
@@ -1427,13 +1446,6 @@ function SettingsView({
             <strong>PP calculator</strong>
           </div>
           <span className="settings-value">{calculator}</span>
-        </div>
-
-        <div className="settings-row">
-          <div>
-            <strong>Polling interval</strong>
-          </div>
-          <span className="settings-value">120 ms</span>
         </div>
 
         <div className="settings-row">

@@ -33,6 +33,7 @@ export interface OverlaySettings {
   toggleKey: string
   editorPanelWidth: number
   editorPanelHeight: number
+  dataUpdateIntervalMs: number
   ppPanel: OverlayElementSettings
   statsPanel: OverlayElementSettings
   hitsPanel: OverlayElementSettings

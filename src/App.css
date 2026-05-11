@@ -995,12 +995,12 @@
 }
 
 .overlay-settings-page {
-  max-width: 980px;
+  max-width: none;
 }
 
 .overlay-settings-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 14px;
 }
 
@@ -1021,8 +1021,12 @@
   background: linear-gradient(180deg, rgba(30, 38, 52, 0.96), #171a20);
 }
 
+.overlay-settings-card--primary:has(.toggle-button--active) {
+  border-color: rgba(62, 190, 111, 0.28);
+  background: linear-gradient(180deg, rgba(22, 48, 35, 0.96), #171a20);
+}
+
 .overlay-settings-card--reset {
-  grid-column: 1 / -1;
   min-height: 132px;
   flex-direction: row;
   align-items: center;
@@ -1059,10 +1063,14 @@
   width: 100%;
 }
 
+.overlay-settings-card__single-field {
+  width: min(100%, 260px);
+}
+
 .toggle-button--active {
-  border-color: rgba(74, 132, 240, 0.46);
-  background: rgba(45, 105, 216, 0.2);
-  color: #dbe8ff;
+  border-color: rgba(62, 190, 111, 0.48);
+  background: rgba(40, 150, 83, 0.2);
+  color: #c9f7d9;
 }
 
 .reset-button {
@@ -1967,10 +1975,6 @@
 
   .page-shell {
     padding: 18px 16px 20px;
-  }
-
-  .overlay-settings-grid {
-    grid-template-columns: 1fr;
   }
 
   .overlay-settings-card--reset {

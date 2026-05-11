@@ -35,7 +35,7 @@ fn ensure_single_instance() -> bool {
     use windows::{
         core::w,
         Win32::{
-            Foundation::{GetLastError, HANDLE, ERROR_ALREADY_EXISTS},
+            Foundation::{GetLastError, ERROR_ALREADY_EXISTS, HANDLE},
             System::Threading::CreateMutexW,
         },
     };
@@ -74,10 +74,7 @@ impl Default for AppRuntimeState {
 }
 
 #[tauri::command]
-fn get_initial_snapshot(
-    app: AppHandle,
-    runtime_state: State<'_, AppRuntimeState>,
-) -> AppSnapshot {
+fn get_initial_snapshot(app: AppHandle, runtime_state: State<'_, AppRuntimeState>) -> AppSnapshot {
     if let Some(snapshot) = runtime_state
         .latest_snapshot
         .lock()
@@ -105,7 +102,11 @@ fn start_live_updates(
         return Ok(());
     }
 
-    reader::spawn_live_reader(app, runtime_state.latest_snapshot.clone());
+    reader::spawn_live_reader(
+        app,
+        runtime_state.latest_snapshot.clone(),
+        runtime_state.overlay_settings.clone(),
+    );
 
     Ok(())
 }
