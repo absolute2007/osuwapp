@@ -5,7 +5,7 @@ use tauri::{AppHandle, Manager};
 use crate::models::{OverlaySettings, RecentPlaySnapshot};
 
 const RECENT_PLAYS_FILE: &str = "recent-plays.json";
-const RECENT_PLAY_LIMIT: usize = 5;
+pub const RECENT_PLAY_LIMIT: usize = 30;
 const OVERLAY_SETTINGS_FILE: &str = "overlay-settings.json";
 
 fn app_storage_dir(app: &AppHandle) -> Result<PathBuf, String> {

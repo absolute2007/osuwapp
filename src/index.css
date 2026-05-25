@@ -43,14 +43,25 @@ body {
 }
 
 body[data-overlay-mode='true'] {
-  background: #111318;
+  background: transparent;
+  overflow: hidden;
+}
+
+body[data-overlay-editor-mode='true'] {
+  background: transparent;
   overflow: hidden;
 }
 
 html[data-overlay-mode='true'],
 html[data-overlay-mode='true'] body,
 html[data-overlay-mode='true'] #root {
-  background: #111318 !important;
+  background: transparent !important;
+}
+
+html[data-overlay-editor-mode='true'],
+html[data-overlay-editor-mode='true'] body,
+html[data-overlay-editor-mode='true'] #root {
+  background: transparent !important;
 }
 
 html[data-overlay-mode='true'] #root {

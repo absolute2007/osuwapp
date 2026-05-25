@@ -246,16 +246,10 @@ impl BeatmapCache {
             .first()
             .and_then(|point| (point.beat_len > 0.0).then_some(60_000.0 / point.beat_len));
 
-        let cover_path = path.parent().and_then(|parent| {
-            let parsed_cover = (!parsed_map.background_file.is_empty())
-                .then_some(parsed_map.background_file.as_str())
-                .or_else(|| (!cover_filename.is_empty()).then_some(cover_filename));
-
-            parsed_cover
-                .map(|filename| parent.join(filename))
-                .filter(|cover| cover.exists())
-                .map(|p| p.display().to_string())
-        });
+        let cover_path = path
+            .parent()
+            .and_then(|parent| resolve_cover_path(parent, &parsed_map.background_file, cover_filename))
+            .map(|p| p.display().to_string());
 
         self.path = Some(path.to_path_buf());
         self.map = Some(map);
@@ -296,6 +290,42 @@ impl BeatmapCache {
     ) -> Result<DifficultyAttributes, String> {
         self.difficulty_for(path, cover_filename, 0)
     }
+}
+
+fn resolve_cover_path(parent: &Path, parsed_cover: &str, memory_cover: &str) -> Option<PathBuf> {
+    [parsed_cover, memory_cover]
+        .into_iter()
+        .filter_map(normalize_cover_filename)
+        .find_map(|filename| {
+            let direct = parent.join(&filename);
+            if direct.is_file() {
+                return Some(direct);
+            }
+
+            let basename = Path::new(&filename).file_name()?.to_string_lossy();
+            let basename = basename.trim().to_ascii_lowercase();
+            if basename.is_empty() {
+                return None;
+            }
+
+            fs::read_dir(parent)
+                .ok()?
+                .filter_map(Result::ok)
+                .find_map(|entry| {
+                    let entry_name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                    (entry_name == basename && entry.path().is_file()).then(|| entry.path())
+                })
+        })
+}
+
+fn normalize_cover_filename(filename: &str) -> Option<String> {
+    let filename = filename
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .replace('\\', "/");
+
+    (!filename.is_empty()).then_some(filename)
 }
 
 fn build_snapshot(
@@ -481,6 +511,8 @@ fn maybe_push_recent_play(
                 "{} - {} [{}]",
                 session.beatmap.artist, session.beatmap.title, session.beatmap.difficulty_name
             ),
+            beatmap_path: Some(session.beatmap.path.clone()),
+            cover_path: session.beatmap.cover_path.clone(),
             mods_text: session.live.mods_text.clone(),
             accuracy: session.live.accuracy.unwrap_or_default(),
             combo: session.live.combo,
@@ -488,7 +520,7 @@ fn maybe_push_recent_play(
         },
     );
 
-    recent_plays.truncate(5);
+    recent_plays.truncate(crate::storage::RECENT_PLAY_LIMIT);
 
     if let Err(error) = storage::save_recent_plays(app, recent_plays) {
         log::warn!("Failed to persist recent plays: {error}");

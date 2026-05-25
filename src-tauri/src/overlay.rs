@@ -2,10 +2,10 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tauri::{
@@ -16,10 +16,22 @@ use tauri::{
 use crate::models::{AppSnapshot, OverlaySettings};
 
 const OVERLAY_LABEL: &str = "overlay";
+const OVERLAY_EDITOR_LABEL: &str = "overlay-editor";
 const DEFAULT_OVERLAY_WIDTH: f64 = 420.0;
 const DEFAULT_OVERLAY_HEIGHT: f64 = 248.0;
 const BASE_EDITOR_PANEL_WIDTH: f64 = 760.0;
 const BASE_EDITOR_PANEL_HEIGHT: f64 = 520.0;
+const COMPACT_EDITOR_PANEL_WIDTH: u32 = 680;
+const COMPACT_EDITOR_PANEL_HEIGHT: u32 = 76;
+const OVERLAY_TICK_MS: u64 = 16;
+const OSU_TARGET_REFRESH_MS: u64 = 50;
+const OSU_TARGET_MISSING_REFRESH_MS: u64 = 100;
+const INGAME_INJECT_TIMEOUT_MS: u64 = 1_500;
+const INGAME_INJECT_RETRY_MS: u64 = 750;
+#[cfg(target_os = "windows")]
+const WEB_OVERLAY_FAILOVER_MS: u64 = 8_000;
+#[cfg(target_os = "windows")]
+const WEB_OVERLAY_RETRY_MS: u64 = 15_000;
 #[cfg(target_os = "windows")]
 const OPEN_OVERLAY_SETTINGS_EVENT: &str = "open-overlay-settings";
 
@@ -29,55 +41,66 @@ pub fn spawn_overlay_manager(
     latest_snapshot: Arc<Mutex<Option<AppSnapshot>>>,
     running: Arc<AtomicBool>,
 ) {
-    thread::spawn(move || loop {
-        if !running.load(Ordering::SeqCst) {
-            close_overlay(&app);
-            break;
-        }
-
-        let current_settings = settings
-            .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or_default()
-            .normalized();
-        let poll_interval_ms = current_settings.data_update_interval_ms;
-
+    thread::spawn(move || {
         #[cfg(target_os = "windows")]
-        {
-            let osu_target = windows::find_osu_target();
-            let settings_hotkey_pressed =
-                windows::poll_overlay_settings_hotkey(&current_settings, osu_target.as_ref());
-            if settings_hotkey_pressed
-                && !osu_target
-                    .as_ref()
-                    .is_some_and(|target| target.is_fullscreen_surface)
-            {
-                let _ = app.emit(OPEN_OVERLAY_SETTINGS_EVENT, ());
-                open_overlay_settings_window(&app);
+        let mut cached_osu_target: Option<windows::OsuWindowTarget> = None;
+        #[cfg(target_os = "windows")]
+        let mut next_osu_target_refresh = Instant::now();
+
+        loop {
+            if !running.load(Ordering::SeqCst) {
+                close_overlay(&app);
+                break;
             }
 
-            sync_overlay_window(
-                &app,
-                &settings,
-                &current_settings,
-                &latest_snapshot,
-                osu_target,
-                settings_hotkey_pressed,
-            );
-        }
+            let current_settings = settings
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default()
+                .normalized();
 
-        #[cfg(not(target_os = "windows"))]
-        {
-            sync_overlay_window(
-                &app,
-                &settings,
-                &current_settings,
-                &latest_snapshot,
-                None,
-                false,
-            );
+            #[cfg(target_os = "windows")]
+            {
+                if Instant::now() >= next_osu_target_refresh {
+                    cached_osu_target = windows::find_osu_target();
+                    next_osu_target_refresh = Instant::now()
+                        + Duration::from_millis(if cached_osu_target.is_some() {
+                            OSU_TARGET_REFRESH_MS
+                        } else {
+                            OSU_TARGET_MISSING_REFRESH_MS
+                        });
+                }
+
+                let osu_target = cached_osu_target;
+                let settings_hotkey_pressed =
+                    windows::poll_overlay_settings_hotkey(&current_settings, osu_target.as_ref());
+                if settings_hotkey_pressed {
+                    let _ = app.emit(OPEN_OVERLAY_SETTINGS_EVENT, ());
+                }
+
+                sync_overlay_window(
+                    &app,
+                    &settings,
+                    &current_settings,
+                    &latest_snapshot,
+                    osu_target,
+                    settings_hotkey_pressed,
+                );
+            }
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                sync_overlay_window(
+                    &app,
+                    &settings,
+                    &current_settings,
+                    &latest_snapshot,
+                    None,
+                    false,
+                );
+            }
+            thread::sleep(Duration::from_millis(OVERLAY_TICK_MS));
         }
-        thread::sleep(Duration::from_millis(poll_interval_ms));
     });
 }
 
@@ -93,6 +116,8 @@ fn sync_overlay_window(
     {
         if !settings.enabled {
             hide_overlay(app);
+            windows::stop_ingame_overlay();
+            windows::stop_web_overlay();
             return;
         }
 
@@ -102,68 +127,90 @@ fn sync_overlay_window(
 
             if is_focused && !is_minimized {
                 hide_overlay(app);
+                windows::stop_ingame_overlay();
+                windows::stop_web_overlay();
                 return;
             }
         }
 
         let Some(target) = osu_target else {
             hide_overlay(app);
-            return;
-        };
-
-        if target.is_fullscreen_surface {
-            hide_overlay(app);
-
-            let snapshot = latest_snapshot.lock().ok().and_then(|guard| guard.clone());
-            if let Some(dll_dir) = resolve_asdf_overlay_dir(app) {
-                if let Some(next_settings) = windows::sync_ingame_overlay(
-                    &dll_dir,
-                    &target,
-                    settings,
-                    snapshot.as_ref(),
-                    settings_hotkey_pressed,
-                ) {
-                    if let Ok(mut guard) = settings_store.lock() {
-                        *guard = next_settings.clone();
-                    }
-                    let _ = crate::storage::save_overlay_settings(app, &next_settings);
-                    let _ = app.emit("overlay-settings-updated", &next_settings);
-                }
+            windows::stop_ingame_overlay();
+            windows::stop_web_overlay();
+            if settings_hotkey_pressed {
+                open_overlay_settings_window(app);
             }
             return;
-        }
+        };
 
         if target.is_minimized {
             hide_overlay(app);
             windows::stop_ingame_overlay();
+            windows::stop_web_overlay();
             return;
         }
 
-        if !target.is_foreground {
-            hide_overlay(app);
-            windows::stop_ingame_overlay();
-            return;
-        }
+        hide_overlay(app);
 
-        windows::stop_ingame_overlay();
-
-        let overlay_width = settings.width;
-        let overlay_height = settings.height;
-        let x = target.rect.left.saturating_add(settings.offset_x);
-        let y = target.rect.top.saturating_add(settings.offset_y);
-
-        let Ok(window) = ensure_overlay_window(app) else {
+        let Some(dll_dir) = resolve_asdf_overlay_dir(app) else {
+            overlay_debug("failed: asdf overlay dll dir not found");
             return;
         };
 
-        let _ = window.set_size(Size::Physical(PhysicalSize::new(
-            overlay_width,
-            overlay_height,
-        )));
-        let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
-        let _ =
-            windows::position_capture_overlay_window(&window, x, y, overlay_width, overlay_height);
-        let _ = window.show();
+        if target.is_fullscreen_surface {
+            windows::stop_web_overlay();
+            sync_legacy_overlay_window(
+                app,
+                settings_store,
+                settings,
+                latest_snapshot,
+                target,
+                settings_hotkey_pressed,
+                &dll_dir,
+            );
+            return;
+        }
+
+        let Some((electron_exe, overlay_script)) = resolve_web_overlay_runtime(app) else {
+            overlay_debug("failed: web overlay runtime not found");
+            sync_legacy_overlay_window(
+                app,
+                settings_store,
+                settings,
+                latest_snapshot,
+                target,
+                settings_hotkey_pressed,
+                &dll_dir,
+            );
+            return;
+        };
+
+        let snapshot = latest_snapshot.lock().ok().and_then(|guard| guard.clone());
+        if let Some(next_settings) = windows::sync_web_overlay(
+            &electron_exe,
+            &overlay_script,
+            &dll_dir,
+            &target,
+            settings,
+            snapshot.as_ref(),
+            settings_hotkey_pressed,
+        ) {
+            persist_overlay_settings(app, settings_store, next_settings);
+        }
+
+        if windows::web_overlay_failed() {
+            sync_legacy_overlay_window(
+                app,
+                settings_store,
+                settings,
+                latest_snapshot,
+                target,
+                settings_hotkey_pressed,
+                &dll_dir,
+            );
+        } else if windows::web_overlay_is_running() {
+            windows::stop_ingame_overlay();
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -171,7 +218,103 @@ fn sync_overlay_window(
         let _ = app;
         let _ = settings_store;
         let _ = settings;
+        let _ = latest_snapshot;
     }
+}
+
+#[cfg(target_os = "windows")]
+fn sync_legacy_overlay_window(
+    app: &AppHandle,
+    settings_store: &Arc<Mutex<OverlaySettings>>,
+    settings: &OverlaySettings,
+    latest_snapshot: &Arc<Mutex<Option<AppSnapshot>>>,
+    target: windows::OsuWindowTarget,
+    settings_hotkey_pressed: bool,
+    dll_dir: &std::path::Path,
+) {
+    if target.is_fullscreen_surface {
+        if !target.is_foreground {
+            hide_overlay(app);
+            windows::stop_ingame_overlay();
+            return;
+        }
+
+        let snapshot = latest_snapshot.lock().ok().and_then(|guard| guard.clone());
+        if let Some(next_settings) = windows::sync_ingame_overlay(
+            dll_dir,
+            &target,
+            settings,
+            snapshot.as_ref(),
+            settings_hotkey_pressed,
+        ) {
+            persist_overlay_settings(app, settings_store, next_settings);
+        }
+        return;
+    }
+
+    windows::stop_ingame_overlay();
+
+    if settings_hotkey_pressed {
+        open_overlay_editor_window(app, Some(&target));
+    }
+
+    if overlay_editor_is_visible(app) {
+        hide_overlay(app);
+        return;
+    }
+
+    let overlay_width = settings.width;
+    let overlay_height = settings.height;
+    let base_rect = target.rect;
+    let x = base_rect.left.saturating_add(settings.offset_x);
+    let y = base_rect.top.saturating_add(settings.offset_y);
+
+    let Ok(window) = ensure_overlay_window(app) else {
+        overlay_debug("failed: could not ensure overlay window");
+        return;
+    };
+
+    let _ = window.set_size(Size::Physical(PhysicalSize::new(
+        overlay_width,
+        overlay_height,
+    )));
+    let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
+    let _ = windows::position_capture_overlay_window(&window, x, y, overlay_width, overlay_height);
+    if let Err(error) = window.show() {
+        overlay_debug(&format!("failed: show overlay window: {error}"));
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn overlay_debug(line: &str) {
+    use std::{fs::OpenOptions, io::Write};
+
+    let path = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("overlay-debug.log");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn persist_overlay_settings(
+    app: &AppHandle,
+    settings_store: &Arc<Mutex<OverlaySettings>>,
+    settings: OverlaySettings,
+) {
+    let normalized = settings.normalized();
+
+    if let Err(error) = crate::storage::save_overlay_settings(app, &normalized) {
+        log::warn!("Failed to save in-game overlay settings: {error}");
+        return;
+    }
+
+    if let Ok(mut guard) = settings_store.lock() {
+        *guard = normalized.clone();
+    }
+
+    let _ = app.emit("overlay-settings-updated", &normalized);
 }
 
 fn hide_overlay(app: &AppHandle) {
@@ -185,6 +328,109 @@ fn hide_overlay(app: &AppHandle) {
     #[cfg(not(target_os = "windows"))]
     if let Some(window) = app.get_webview_window(OVERLAY_LABEL) {
         let _ = window.hide();
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn overlay_editor_is_visible(app: &AppHandle) -> bool {
+    app.get_webview_window(OVERLAY_EDITOR_LABEL)
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn open_overlay_editor_window(app: &AppHandle, osu_target: Option<&windows::OsuWindowTarget>) {
+    let Some(target) = osu_target else {
+        open_overlay_settings_window(app);
+        return;
+    };
+
+    let no_activate = target.is_fullscreen_surface;
+    let editor_rect = if no_activate {
+        target.monitor_rect
+    } else {
+        target.rect
+    };
+    let width = editor_rect.width().max(640) as f64;
+    let height = editor_rect.height().max(420) as f64;
+    hide_overlay(app);
+
+    if let Some(existing) = app.get_webview_window(OVERLAY_EDITOR_LABEL) {
+        let _ = existing.set_always_on_top(true);
+        let _ = existing.set_focusable(!no_activate);
+        let _ = existing.set_ignore_cursor_events(false);
+        let _ = existing.set_size(Size::Physical(PhysicalSize::new(
+            width as u32,
+            height as u32,
+        )));
+        let _ = existing.set_position(Position::Physical(PhysicalPosition::new(
+            editor_rect.left,
+            editor_rect.top,
+        )));
+        let _ = windows::configure_editor_overlay(&existing, no_activate);
+        let _ = windows::position_editor_overlay_window(
+            &existing,
+            editor_rect.left,
+            editor_rect.top,
+            width as u32,
+            height as u32,
+            no_activate,
+        );
+        if !no_activate {
+            let _ = existing.unminimize();
+            let _ = existing.set_focus();
+            windows::bring_window_to_front(&existing);
+        }
+        return;
+    }
+
+    let window = match WebviewWindowBuilder::new(
+        app,
+        OVERLAY_EDITOR_LABEL,
+        WebviewUrl::App("index.html?overlayEditor=1".into()),
+    )
+    .title("osu! Companion Overlay Editor")
+    .decorations(false)
+    .transparent(true)
+    .resizable(false)
+    .focused(!no_activate)
+    .visible(false)
+    .shadow(false)
+    .inner_size(width, height)
+    .build()
+    {
+        Ok(window) => window,
+        Err(error) => {
+            log::warn!("Failed to open overlay editor: {error}");
+            open_overlay_settings_window(app);
+            return;
+        }
+    };
+
+    let _ = window.set_always_on_top(true);
+    let _ = window.set_focusable(!no_activate);
+    let _ = window.set_ignore_cursor_events(false);
+    let _ = window.set_size(Size::Physical(PhysicalSize::new(
+        width as u32,
+        height as u32,
+    )));
+    let _ = window.set_position(Position::Physical(PhysicalPosition::new(
+        editor_rect.left,
+        editor_rect.top,
+    )));
+    let _ = windows::configure_editor_overlay(&window, no_activate);
+    let _ = windows::position_editor_overlay_window(
+        &window,
+        editor_rect.left,
+        editor_rect.top,
+        width as u32,
+        height as u32,
+        no_activate,
+    );
+    if !no_activate {
+        let _ = window.show();
+        let _ = window.set_focus();
+        windows::bring_window_to_front(&window);
     }
 }
 
@@ -203,31 +449,87 @@ pub fn close_overlay(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(OVERLAY_LABEL) {
         let _ = window.close();
     }
+    if let Some(window) = app.get_webview_window(OVERLAY_EDITOR_LABEL) {
+        let _ = window.close();
+    }
 }
 
 pub fn hide_overlay_windows(app: &AppHandle) {
     hide_overlay(app);
+    if let Some(window) = app.get_webview_window(OVERLAY_EDITOR_LABEL) {
+        let _ = window.hide();
+    }
 }
 
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 fn resolve_asdf_overlay_dir(app: &AppHandle) -> Option<PathBuf> {
-    let resource_dir = app.path().resource_dir().ok();
-    let candidates = [
-        resource_dir
-            .as_ref()
-            .map(|dir| dir.join("resources").join("asdf-overlay")),
-        std::env::current_dir()
-            .ok()
-            .map(|dir| dir.join("src-tauri").join("resources").join("asdf-overlay")),
-        std::env::current_dir()
-            .ok()
-            .map(|dir| dir.join("resources").join("asdf-overlay")),
-    ];
+    static ASDF_OVERLAY_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-    candidates
-        .into_iter()
-        .flatten()
-        .find(|dir| dir.join("asdf_overlay-x64.dll").exists())
+    ASDF_OVERLAY_DIR
+        .get_or_init(|| {
+            let resource_dir = app.path().resource_dir().ok();
+            let current_dir = std::env::current_dir().ok();
+            let candidates = [
+                resource_dir
+                    .as_ref()
+                    .map(|dir| dir.join("resources").join("asdf-overlay")),
+                current_dir
+                    .as_ref()
+                    .map(|dir| dir.join("src-tauri").join("resources").join("asdf-overlay")),
+                current_dir
+                    .as_ref()
+                    .map(|dir| dir.join("resources").join("asdf-overlay")),
+            ];
+
+            candidates
+                .into_iter()
+                .flatten()
+                .find(|dir| dir.join("asdf_overlay-x64.dll").exists())
+        })
+        .clone()
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_web_overlay_runtime(app: &AppHandle) -> Option<(PathBuf, PathBuf)> {
+    static WEB_OVERLAY_RUNTIME: OnceLock<Option<(PathBuf, PathBuf)>> = OnceLock::new();
+
+    WEB_OVERLAY_RUNTIME
+        .get_or_init(|| {
+            let current_dir = std::env::current_dir().ok();
+            let resource_dir = app.path().resource_dir().ok();
+            let project_candidates = [
+                current_dir.clone(),
+                current_dir.as_ref().and_then(|dir| dir.parent().map(PathBuf::from)),
+                resource_dir,
+            ];
+
+            project_candidates
+                .into_iter()
+                .flatten()
+                .find_map(|project_dir| {
+                    let script = project_dir.join("scripts").join("tosu-overlay").join("main.mjs");
+                    if !script.exists() {
+                        return None;
+                    }
+
+                    [
+                        project_dir
+                            .join("node_modules")
+                            .join(".bin")
+                            .join("electron.cmd"),
+                        project_dir
+                            .join("node_modules")
+                            .join("electron")
+                            .join("dist")
+                            .join("electron.exe"),
+                    ]
+                    .into_iter()
+                    .find(|electron| electron.exists())
+                    .map(|electron| (electron, script))
+                })
+        })
+        .clone()
 }
 
 fn ensure_overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
@@ -242,7 +544,7 @@ fn ensure_overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         WebviewUrl::App("index.html?overlay=1".into()),
     )
     .decorations(false)
-    .transparent(false)
+    .transparent(true)
     .resizable(false)
     .focused(false)
     .visible(false)
@@ -278,12 +580,17 @@ fn configure_overlay_window(window: &WebviewWindow) -> Result<(), String> {
 mod windows {
     use std::{
         fs,
-        path::Path,
+        fs::OpenOptions,
+        io::{BufRead, BufReader, Write},
+        os::windows::process::CommandExt,
+        path::{Path, PathBuf},
+        process::{Child, ChildStdin, Command, Stdio},
         sync::{
             atomic::{AtomicBool, Ordering},
-            Mutex, OnceLock,
+            Arc, Mutex, OnceLock,
         },
-        time::{Duration, Instant},
+        thread,
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     use crate::models::{OverlayElementSettings, OverlaySettings, SessionPhase, SessionSnapshot};
@@ -335,11 +642,13 @@ mod windows {
 
     const EXCLUDE_WORDS: [&str; 2] = ["umu-run", "waitforexitandrun"];
     static INGAME_STATE: OnceLock<Mutex<InjectedOverlayState>> = OnceLock::new();
+    static WEB_OVERLAY_STATE: OnceLock<Mutex<ElectronWebOverlayState>> = OnceLock::new();
 
     #[derive(Clone, Copy)]
     pub struct OsuWindowTarget {
         pub pid: u32,
         pub rect: Rect,
+        pub monitor_rect: Rect,
         pub is_minimized: bool,
         pub is_foreground: bool,
         pub is_fullscreen_surface: bool,
@@ -366,6 +675,17 @@ mod windows {
 
         pub fn is_valid(&self) -> bool {
             self.width() > 0 && self.height() > 0
+        }
+    }
+
+    impl From<RECT> for Rect {
+        fn from(rect: RECT) -> Self {
+            Self {
+                left: rect.left,
+                top: rect.top,
+                right: rect.right,
+                bottom: rect.bottom,
+            }
         }
     }
 
@@ -415,17 +735,16 @@ mod windows {
             GetWindowRect(hwnd, &mut rect).ok()?;
         }
 
+        let monitor_rect = monitor_rect_for_window(hwnd).unwrap_or(rect);
+        let is_fullscreen_surface = window_covers_monitor_rect(&rect, &monitor_rect);
+
         Some(OsuWindowTarget {
             pid: process.pid,
-            rect: Rect {
-                left: rect.left,
-                top: rect.top,
-                right: rect.right,
-                bottom: rect.bottom,
-            },
+            rect: rect.into(),
+            monitor_rect: monitor_rect.into(),
             is_minimized: unsafe { IsIconic(hwnd).as_bool() },
             is_foreground: unsafe { GetForegroundWindow() == hwnd },
-            is_fullscreen_surface: window_covers_monitor(hwnd, &rect),
+            is_fullscreen_surface,
         })
     }
 
@@ -473,17 +792,34 @@ mod windows {
                 0,
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER,
             );
-            let _ = SetWindowPos(
-                hwnd,
-                Some(HWND_NOTOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER,
-            );
             let _ = SetForegroundWindow(hwnd);
         }
+    }
+
+    pub fn configure_editor_overlay(
+        window: &WebviewWindow,
+        no_activate: bool,
+    ) -> Result<(), String> {
+        let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+
+        unsafe {
+            let current_ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+            let mut next_ex_style = (current_ex_style & !WS_EX_TOOLWINDOW.0 & !WS_EX_TRANSPARENT.0)
+                | WS_EX_APPWINDOW.0
+                | WS_EX_LAYERED.0;
+
+            if no_activate {
+                next_ex_style |= WS_EX_NOACTIVATE.0;
+            } else {
+                next_ex_style &= !WS_EX_NOACTIVATE.0;
+            }
+
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next_ex_style as isize);
+            let _ = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
+            let _ = SetWindowDisplayAffinity(hwnd, WDA_NONE);
+        }
+
+        Ok(())
     }
 
     pub fn configure_capture_overlay(window: &WebviewWindow) -> Result<(), String> {
@@ -527,6 +863,48 @@ mod windows {
                 height as i32,
                 SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING,
             );
+        }
+
+        Ok(())
+    }
+
+    pub fn position_editor_overlay_window(
+        window: &WebviewWindow,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        no_activate: bool,
+    ) -> Result<(), String> {
+        let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+
+        unsafe {
+            let _ = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
+            let _ = ShowWindow(
+                hwnd,
+                if no_activate {
+                    SW_SHOWNOACTIVATE
+                } else {
+                    SW_SHOW
+                },
+            );
+            let flags = if no_activate {
+                SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING
+            } else {
+                SWP_NOOWNERZORDER | SWP_NOSENDCHANGING
+            };
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                width as i32,
+                height as i32,
+                flags,
+            );
+            if !no_activate {
+                let _ = SetForegroundWindow(hwnd);
+            }
         }
 
         Ok(())
@@ -576,6 +954,354 @@ mod windows {
         }
     }
 
+    pub fn sync_web_overlay(
+        electron_exe: &Path,
+        overlay_script: &Path,
+        dll_dir: &Path,
+        target: &OsuWindowTarget,
+        settings: &OverlaySettings,
+        snapshot: Option<&super::AppSnapshot>,
+        toggle_editor: bool,
+    ) -> Option<OverlaySettings> {
+        let state = WEB_OVERLAY_STATE.get_or_init(|| Mutex::new(ElectronWebOverlayState::new()));
+
+        if let Ok(mut guard) = state.lock() {
+            return guard.sync(
+                electron_exe,
+                overlay_script,
+                dll_dir,
+                target,
+                settings,
+                snapshot,
+                toggle_editor,
+            );
+        }
+
+        None
+    }
+
+    pub fn stop_web_overlay() {
+        if let Some(state) = WEB_OVERLAY_STATE.get() {
+            if let Ok(mut guard) = state.lock() {
+                guard.reset();
+            }
+        }
+    }
+
+    pub fn web_overlay_is_running() -> bool {
+        WEB_OVERLAY_STATE
+            .get()
+            .and_then(|state| state.lock().ok())
+            .is_some_and(|guard| guard.child.is_some())
+    }
+
+    pub fn web_overlay_failed() -> bool {
+        WEB_OVERLAY_STATE
+            .get()
+            .and_then(|state| state.lock().ok())
+            .is_some_and(|guard| guard.failed_or_in_cooldown())
+    }
+
+    struct ElectronWebOverlayState {
+        pid: Option<u32>,
+        child: Option<Child>,
+        stdin: Option<ChildStdin>,
+        editor_active: bool,
+        started_at: Option<Instant>,
+        has_window: Arc<AtomicBool>,
+        rendered: Arc<AtomicBool>,
+        failed: Arc<AtomicBool>,
+        pending_settings: Arc<Mutex<Option<OverlaySettings>>>,
+        failed_until: Option<Instant>,
+        disabled_pid: Option<u32>,
+    }
+
+    impl ElectronWebOverlayState {
+        fn new() -> Self {
+            Self {
+                pid: None,
+                child: None,
+                stdin: None,
+                editor_active: false,
+                started_at: None,
+                has_window: Arc::new(AtomicBool::new(false)),
+                rendered: Arc::new(AtomicBool::new(false)),
+                failed: Arc::new(AtomicBool::new(false)),
+                pending_settings: Arc::new(Mutex::new(None)),
+                failed_until: None,
+                disabled_pid: None,
+            }
+        }
+
+        fn reset(&mut self) {
+            self.reset_process();
+            self.disabled_pid = None;
+        }
+
+        fn reset_process(&mut self) {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+            }
+            self.stdin = None;
+            self.pid = None;
+            self.editor_active = false;
+            self.started_at = None;
+            self.has_window.store(false, Ordering::SeqCst);
+            self.rendered.store(false, Ordering::SeqCst);
+            self.failed.store(false, Ordering::SeqCst);
+        }
+
+        fn disable_for_pid(&mut self, pid: u32, reason: &str) {
+            web_overlay_debug(&format!("disabled web overlay for pid={pid}: {reason}"));
+            self.disabled_pid = Some(pid);
+            self.failed_until = None;
+            self.reset_process();
+        }
+
+        fn retry_later(&mut self, pid: u32, reason: &str) {
+            web_overlay_debug(&format!(
+                "retry web overlay later for pid={pid}: {reason}"
+            ));
+            self.failed_until =
+                Some(Instant::now() + Duration::from_millis(super::WEB_OVERLAY_RETRY_MS));
+            self.reset_process();
+        }
+
+        fn sync(
+            &mut self,
+            electron_exe: &Path,
+            overlay_script: &Path,
+            dll_dir: &Path,
+            target: &OsuWindowTarget,
+            settings: &OverlaySettings,
+            snapshot: Option<&super::AppSnapshot>,
+            toggle_editor: bool,
+        ) -> Option<OverlaySettings> {
+            if self.disabled_pid == Some(target.pid) {
+                return self.take_pending_settings();
+            }
+
+            if self.disabled_pid.is_some() && self.disabled_pid != Some(target.pid) {
+                self.disabled_pid = None;
+            }
+
+            if self
+                .failed_until
+                .is_some_and(|retry_after| Instant::now() < retry_after)
+            {
+                return self.take_pending_settings();
+            }
+
+            if self.failed() {
+                self.retry_later(target.pid, "runtime reported failure");
+                return self.take_pending_settings();
+            }
+
+            let child_exited = self
+                .child
+                .as_mut()
+                .and_then(|child| child.try_wait().ok())
+                .flatten()
+                .is_some();
+
+            if child_exited {
+                self.retry_later(target.pid, "child exited");
+                return self.take_pending_settings();
+            }
+
+            if self.pid != Some(target.pid) {
+                self.reset_process();
+                if !self.spawn(electron_exe, overlay_script, dll_dir, target) {
+                    self.disable_for_pid(target.pid, "spawn failed");
+                    return self.take_pending_settings();
+                }
+            }
+
+            if toggle_editor {
+                self.editor_active = !self.editor_active;
+                self.send_json(&serde_json::json!({
+                    "type": "editor",
+                    "active": self.editor_active,
+                }));
+            }
+
+            self.send_json(&serde_json::json!({
+                "type": "state",
+                "payload": {
+                    "settings": settings,
+                    "snapshot": snapshot,
+                }
+            }));
+
+            self.take_pending_settings()
+        }
+
+        fn failed_or_in_cooldown(&self) -> bool {
+            if self.disabled_pid.is_some() {
+                return true;
+            }
+            self.failed_until
+                .is_some_and(|retry_after| Instant::now() < retry_after)
+                || self.failed()
+        }
+
+        fn failed(&self) -> bool {
+            self.failed.load(Ordering::SeqCst)
+                || self.started_at.is_some_and(|started_at| {
+                    started_at.elapsed() > Duration::from_millis(super::WEB_OVERLAY_FAILOVER_MS)
+                        && !self.rendered.load(Ordering::SeqCst)
+                })
+        }
+
+        fn spawn(
+            &mut self,
+            electron_exe: &Path,
+            overlay_script: &Path,
+            dll_dir: &Path,
+            target: &OsuWindowTarget,
+        ) -> bool {
+            let pid = target.pid;
+            let Some(project_dir) = overlay_script
+                .parent()
+                .and_then(|dir| dir.parent())
+                .and_then(|dir| dir.parent())
+            else {
+                log::warn!("Failed to resolve web overlay project directory");
+                return false;
+            };
+            web_overlay_debug(&format!(
+                "spawn electron={} script={} dll_dir={} pid={pid}",
+                electron_exe.display(),
+                overlay_script.display(),
+                dll_dir.display()
+            ));
+
+            let mut child = match Command::new(electron_exe)
+                .arg(overlay_script)
+                .arg("--pid")
+                .arg(pid.to_string())
+                .arg("--dll-dir")
+                .arg(dll_dir)
+                .arg("--width")
+                .arg(target.rect.width().max(1).to_string())
+                .arg("--height")
+                .arg(target.rect.height().max(1).to_string())
+                .current_dir(project_dir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .creation_flags(0x08000000)
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(error) => {
+                    log::warn!("Failed to start web overlay runtime: {error}");
+                    web_overlay_debug(&format!("spawn failed: {error}"));
+                    return false;
+                }
+            };
+
+            let Some(stdout) = child.stdout.take() else {
+                let _ = child.kill();
+                return false;
+            };
+
+            if let Some(stderr) = child.stderr.take() {
+                thread::spawn(move || {
+                    let reader = BufReader::new(stderr);
+                    for line in reader.lines().map_while(Result::ok) {
+                        log::warn!("web overlay runtime: {line}");
+                        web_overlay_debug(&format!("stderr: {line}"));
+                    }
+                });
+            }
+
+            let pending_settings = self.pending_settings.clone();
+            let has_window = self.has_window.clone();
+            let rendered = self.rendered.clone();
+            let failed = self.failed.clone();
+            thread::spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines().map_while(Result::ok) {
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                        continue;
+                    };
+                    let message_type = value.get("type").and_then(|item| item.as_str());
+                    if message_type == Some("added") {
+                        has_window.store(true, Ordering::SeqCst);
+                    }
+                    if message_type == Some("paint") {
+                        rendered.store(true, Ordering::SeqCst);
+                    }
+                    if matches!(message_type, Some("error") | Some("disconnected")) {
+                        failed.store(true, Ordering::SeqCst);
+                    }
+                    if message_type != Some("settings") {
+                        if matches!(
+                            message_type,
+                            Some("error") | Some("ready") | Some("added") | Some("paint")
+                        ) {
+                            log::warn!("web overlay runtime: {line}");
+                            web_overlay_debug(&format!("stdout: {line}"));
+                        }
+                        continue;
+                    }
+                    let Some(settings_value) = value.get("settings") else {
+                        continue;
+                    };
+                    if let Ok(settings) =
+                        serde_json::from_value::<OverlaySettings>(settings_value.clone())
+                    {
+                        if let Ok(mut guard) = pending_settings.lock() {
+                            *guard = Some(settings.normalized());
+                        }
+                    }
+                }
+            });
+
+            self.stdin = child.stdin.take();
+            self.pid = Some(pid);
+            self.started_at = Some(Instant::now());
+            self.has_window.store(false, Ordering::SeqCst);
+            self.rendered.store(false, Ordering::SeqCst);
+            self.failed.store(false, Ordering::SeqCst);
+            self.child = Some(child);
+            web_overlay_debug("spawn ok");
+            true
+        }
+
+        fn send_json(&mut self, value: &serde_json::Value) {
+            let Some(stdin) = self.stdin.as_mut() else {
+                web_overlay_debug("stdin missing");
+                return;
+            };
+            match writeln!(stdin, "{value}") {
+                Ok(()) => {
+                    let _ = stdin.flush();
+                }
+                Err(error) => {
+                    web_overlay_debug(&format!("stdin error: {error}"));
+                }
+            }
+        }
+
+        fn take_pending_settings(&self) -> Option<OverlaySettings> {
+            self.pending_settings
+                .lock()
+                .ok()
+                .and_then(|mut guard| guard.take())
+        }
+    }
+
+    fn web_overlay_debug(line: &str) {
+        let path = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("web-overlay-debug.log");
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+
     struct InjectedOverlayState {
         runtime: Option<Runtime>,
         pid: Option<u32>,
@@ -586,9 +1312,11 @@ mod windows {
         window_size: Option<(u32, u32)>,
         input_blocking: bool,
         surface_mode: SurfaceMode,
+        editor_surface_origin: (i32, i32),
         last_frame_key: Option<String>,
         editor_active: bool,
         editor_settings: Option<OverlaySettings>,
+        last_session: Option<SessionSnapshot>,
         selected_element: OverlayElement,
         editing_field: Option<EditorField>,
         edit_buffer: String,
@@ -600,10 +1328,19 @@ mod windows {
     #[derive(Clone, Copy)]
     struct DragOrigin {
         element: OverlayElement,
+        mode: DragMode,
         cursor_x: i32,
         cursor_y: i32,
         offset_x: i32,
         offset_y: i32,
+        width: u32,
+        height: u32,
+    }
+
+    #[derive(Clone, Copy)]
+    enum DragMode {
+        Move,
+        Resize,
     }
 
     #[derive(Clone, Copy, PartialEq, Eq)]
@@ -638,9 +1375,11 @@ mod windows {
                 window_size: None,
                 input_blocking: false,
                 surface_mode: SurfaceMode::Unknown,
+                editor_surface_origin: (0, 0),
                 last_frame_key: None,
                 editor_active: false,
                 editor_settings: None,
+                last_session: None,
                 selected_element: OverlayElement::Pp,
                 editing_field: None,
                 edit_buffer: String::new(),
@@ -659,9 +1398,11 @@ mod windows {
             self.pid = None;
             self.input_blocking = false;
             self.surface_mode = SurfaceMode::Unknown;
+            self.editor_surface_origin = (0, 0);
             self.last_frame_key = None;
             self.editor_active = false;
             self.editor_settings = None;
+            self.last_session = None;
             self.selected_element = OverlayElement::Pp;
             self.editing_field = None;
             self.edit_buffer.clear();
@@ -690,16 +1431,24 @@ mod windows {
             }
 
             if self.pid != Some(target.pid) && !self.attach(dll_dir, target.pid) {
-                self.failed_until = Some(Instant::now() + Duration::from_secs(3));
+                self.failed_until =
+                    Some(Instant::now() + Duration::from_millis(super::INGAME_INJECT_RETRY_MS));
                 return None;
             }
 
             if toggle_editor {
-                self.editor_active = !self.editor_active;
-                self.editor_settings = self.editor_active.then(|| settings.clone());
-                self.selected_element = OverlayElement::Pp;
-                self.editing_field = None;
-                self.edit_buffer.clear();
+                if self.editor_active {
+                    self.editor_active = false;
+                    self.editor_settings = None;
+                    self.drag_origin = None;
+                } else {
+                    self.editor_active = true;
+                    self.editor_settings = Some(settings.clone());
+                    self.selected_element = OverlayElement::Pp;
+                    self.editing_field = None;
+                    self.edit_buffer.clear();
+                    self.drag_origin = None;
+                }
                 self.surface_mode = SurfaceMode::Unknown;
                 self.last_frame_key = None;
             }
@@ -767,9 +1516,15 @@ mod windows {
 
             let active_settings = self.editor_settings.as_ref().unwrap_or(settings);
             let desired_mode = if self.editor_active {
-                SurfaceMode::Editor
+                let layout = editor_surface_layout(active_settings, self.window_size);
+                self.editor_surface_origin = (layout.x, layout.y);
+                SurfaceMode::Editor {
+                    x: layout.x,
+                    y: layout.y,
+                }
             } else {
                 let bounds = overlay_bounds(active_settings);
+                self.editor_surface_origin = (0, 0);
                 SurfaceMode::Hud {
                     x: bounds.0,
                     y: bounds.1,
@@ -781,12 +1536,18 @@ mod windows {
                 self.surface_mode = desired_mode;
             }
 
-            let session = snapshot.and_then(|item| item.session.as_ref());
+            if let Some(session) = snapshot.and_then(|item| item.session.as_ref()) {
+                self.last_session = Some(session.clone());
+            }
+            let session = snapshot
+                .and_then(|item| item.session.as_ref())
+                .or(self.last_session.as_ref());
             let frame_key = if self.editor_active {
                 ingame_editor_frame_key(
                     active_settings,
                     session,
                     self.window_size,
+                    self.editor_surface_origin,
                     self.selected_element,
                     self.editing_field,
                     &self.edit_buffer,
@@ -803,6 +1564,7 @@ mod windows {
                     active_settings,
                     session,
                     self.window_size,
+                    self.editor_surface_origin,
                     self.selected_element,
                     self.editing_field,
                     &self.edit_buffer,
@@ -825,15 +1587,21 @@ mod windows {
                 return false;
             };
 
-            let x64_dll = dll_dir.join("asdf_overlay-x64.dll");
-            let x86_dll = dll_dir.join("asdf_overlay-x86.dll");
+            let injection_dll_dir =
+                prepare_injection_dll_dir(dll_dir, pid).unwrap_or_else(|| dll_dir.to_path_buf());
+            let x64_dll = injection_dll_dir.join("asdf_overlay-x64.dll");
+            let x86_dll = injection_dll_dir.join("asdf_overlay-x86.dll");
             let dll = OverlayDll {
                 x64: Some(&x64_dll),
                 x86: Some(&x86_dll),
                 arm64: None,
             };
 
-            match runtime.block_on(inject(pid, dll, Some(Duration::from_secs(4)))) {
+            match runtime.block_on(inject(
+                pid,
+                dll,
+                Some(Duration::from_millis(super::INGAME_INJECT_TIMEOUT_MS)),
+            )) {
                 Ok((conn, events)) => {
                     self.conn = Some(conn);
                     self.events = Some(events);
@@ -861,10 +1629,10 @@ mod windows {
 
             let mut input_events = Vec::new();
             let mut latest_drag_move = None;
-            let event_limit = if self.editor_active { 64 } else { 8 };
+            let event_limit = if self.editor_active { 128 } else { 16 };
             for _ in 0..event_limit {
                 let event = runtime.block_on(async {
-                    tokio::time::timeout(Duration::from_millis(1), events.recv()).await
+                    tokio::time::timeout(Duration::from_micros(50), events.recv()).await
                 });
 
                 let Ok(Some(event)) = event else {
@@ -881,9 +1649,15 @@ mod windows {
                         self.window_id = Some(id);
                         self.window_size = Some((width, height));
                         let desired_mode = if self.editor_active {
-                            SurfaceMode::Editor
+                            let layout = editor_surface_layout(settings, self.window_size);
+                            self.editor_surface_origin = (layout.x, layout.y);
+                            SurfaceMode::Editor {
+                                x: layout.x,
+                                y: layout.y,
+                            }
                         } else {
                             let bounds = overlay_bounds(settings);
+                            self.editor_surface_origin = (0, 0);
                             SurfaceMode::Hud {
                                 x: bounds.0,
                                 y: bounds.1,
@@ -983,25 +1757,30 @@ mod windows {
                         return;
                     };
 
+                    let screen_x = cursor.client.x.saturating_add(self.editor_surface_origin.0);
+                    let screen_y = cursor.client.y.saturating_add(self.editor_surface_origin.1);
                     let (panel_x, panel_y) = editor_panel_origin(self.window_size, settings);
                     let scale = EditorPanelScale::from_settings(settings);
                     let (local_x, local_y) =
-                        scale.base_point(cursor.client.x - panel_x, cursor.client.y - panel_y);
+                        scale.base_point(screen_x - panel_x, screen_y - panel_y);
 
                     match cursor.event {
                         CursorEvent::Action {
                             state: CursorInputState::Pressed { .. },
                             action: CursorAction::Left,
                         } => {
-                            if let Some((element, offset_x, offset_y)) =
-                                hit_test_overlay_element(settings, cursor.client.x, cursor.client.y)
+                            if let Some((element, mode, offset_x, offset_y, width, height)) =
+                                hit_test_overlay_element(settings, screen_x, screen_y)
                             {
                                 self.drag_origin = Some(DragOrigin {
                                     element,
-                                    cursor_x: cursor.client.x,
-                                    cursor_y: cursor.client.y,
+                                    mode,
+                                    cursor_x: screen_x,
+                                    cursor_y: screen_y,
                                     offset_x,
                                     offset_y,
+                                    width,
+                                    height,
                                 });
                                 self.selected_element = element;
                                 self.last_frame_key = None;
@@ -1015,11 +1794,18 @@ mod windows {
 
                             let next_x = drag
                                 .offset_x
-                                .saturating_add(cursor.client.x.saturating_sub(drag.cursor_x));
+                                .saturating_add(screen_x.saturating_sub(drag.cursor_x));
                             let next_y = drag
                                 .offset_y
-                                .saturating_add(cursor.client.y.saturating_sub(drag.cursor_y));
-                            set_overlay_element_position(settings, drag.element, next_x, next_y);
+                                .saturating_add(screen_y.saturating_sub(drag.cursor_y));
+                            apply_overlay_drag(
+                                settings,
+                                drag,
+                                screen_x - drag.cursor_x,
+                                screen_y - drag.cursor_y,
+                                next_x,
+                                next_y,
+                            );
                             let normalized = settings.clone().normalized();
                             *settings = normalized.clone();
                             self.last_frame_key = None;
@@ -1032,13 +1818,15 @@ mod windows {
                             if let Some(drag) = self.drag_origin {
                                 let next_x = drag
                                     .offset_x
-                                    .saturating_add(cursor.client.x.saturating_sub(drag.cursor_x));
+                                    .saturating_add(screen_x.saturating_sub(drag.cursor_x));
                                 let next_y = drag
                                     .offset_y
-                                    .saturating_add(cursor.client.y.saturating_sub(drag.cursor_y));
-                                set_overlay_element_position(
+                                    .saturating_add(screen_y.saturating_sub(drag.cursor_y));
+                                apply_overlay_drag(
                                     settings,
-                                    drag.element,
+                                    drag,
+                                    screen_x - drag.cursor_x,
+                                    screen_y - drag.cursor_y,
                                     next_x,
                                     next_y,
                                 );
@@ -1049,7 +1837,7 @@ mod windows {
                             }
                             self.drag_origin = None;
 
-                            if in_rect(local_x, local_y, 648, 20, 84, 32) {
+                            if in_rect(local_x, local_y, 612, 14, 52, 28) {
                                 self.editor_active = false;
                                 self.editor_settings = None;
                                 self.surface_mode = SurfaceMode::Unknown;
@@ -1109,11 +1897,36 @@ mod windows {
         }
     }
 
+    fn prepare_injection_dll_dir(source_dir: &Path, pid: u32) -> Option<PathBuf> {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0);
+        let target_dir = std::env::temp_dir()
+            .join("osuwapp-asdf-overlay")
+            .join(format!("{pid}-{stamp}"));
+
+        fs::create_dir_all(&target_dir).ok()?;
+        fs::copy(
+            source_dir.join("asdf_overlay-x64.dll"),
+            target_dir.join("asdf_overlay-x64.dll"),
+        )
+        .ok()?;
+        fs::copy(
+            source_dir.join("asdf_overlay-x86.dll"),
+            target_dir.join("asdf_overlay-x86.dll"),
+        )
+        .ok()?;
+
+        Some(target_dir)
+    }
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum SurfaceMode {
         Unknown,
         Hud { x: i32, y: i32 },
-        Editor,
+        Editor { x: i32, y: i32 },
     }
 
     fn apply_surface_mode(
@@ -1130,9 +1943,9 @@ mod windows {
                 PercentLength::Length(0.0),
                 PercentLength::Length(0.0),
             ),
-            SurfaceMode::Editor => (
-                PercentLength::Length(0.0),
-                PercentLength::Length(0.0),
+            SurfaceMode::Editor { x, y } => (
+                PercentLength::Length(x as f32),
+                PercentLength::Length(y as f32),
                 PercentLength::Length(0.0),
                 PercentLength::Length(0.0),
             ),
@@ -1309,12 +2122,13 @@ mod windows {
         settings: &OverlaySettings,
         session: Option<&SessionSnapshot>,
         window_size: Option<(u32, u32)>,
+        surface_origin: (i32, i32),
         selected_element: OverlayElement,
         editing_field: Option<EditorField>,
         edit_buffer: &str,
     ) -> String {
         format!(
-            "editor:{window_size:?}:{}:{:?}:{}:{}",
+            "editor:{window_size:?}:{surface_origin:?}:{}:{:?}:{}:{}",
             selected_element_label(selected_element),
             editing_field_key(editing_field),
             edit_buffer,
@@ -1326,293 +2140,30 @@ mod windows {
         settings: &OverlaySettings,
         session: Option<&SessionSnapshot>,
         window_size: Option<(u32, u32)>,
+        surface_origin: (i32, i32),
         selected_element: OverlayElement,
-        editing_field: Option<EditorField>,
-        edit_buffer: &str,
+        _editing_field: Option<EditorField>,
+        _edit_buffer: &str,
     ) -> Bitmap {
-        let panel_width = settings.editor_panel_width;
-        let panel_height = settings.editor_panel_height;
-        let (surface_width, surface_height) = window_size.unwrap_or((1280, 720));
-        let mut canvas = BitmapCanvas::new(
-            surface_width.max(panel_width),
-            surface_height.max(panel_height),
-        );
-        draw_overlay_elements(&mut canvas, 0, 0, settings, session, true);
-        draw_selected_element_outline(&mut canvas, settings, selected_element);
-
-        let (panel_x, panel_y) = editor_panel_origin(Some((canvas.width, canvas.height)), settings);
-        let scale = EditorPanelScale::from_settings(settings);
-        canvas.fill_rounded_rect(
-            panel_x,
-            panel_y,
-            panel_width as i32,
-            panel_height as i32,
-            18,
-            [14, 18, 25, 226],
-        );
-        canvas.stroke_rounded_rect(
-            panel_x,
-            panel_y,
-            panel_width as i32,
-            panel_height as i32,
-            18,
-            [96, 112, 138, 120],
-        );
-        canvas.draw_text_clipped(
-            panel_x + scale.x(26),
-            panel_y + scale.y(22),
-            scale.w(360),
-            "Overlay editor",
-            scale.font(20),
-            FontWeight::Semibold,
-            [245, 248, 253, 255],
-        );
-        canvas.draw_text_clipped(
-            panel_x + scale.x(26),
-            panel_y + scale.y(52),
-            scale.w(360),
-            "End",
-            scale.font(12),
-            FontWeight::Normal,
-            [150, 163, 184, 235],
-        );
-        draw_editor_button(
+        let layout = editor_surface_layout(settings, window_size);
+        let mut canvas = BitmapCanvas::new(layout.width, layout.height);
+        let origin_x = surface_origin.0;
+        let origin_y = surface_origin.1;
+        draw_overlay_elements(&mut canvas, -origin_x, -origin_y, settings, session, true);
+        draw_selected_element_outline(
             &mut canvas,
-            scale,
-            panel_x,
-            panel_y,
-            648,
-            20,
-            84,
-            32,
-            "Close",
+            settings,
+            selected_element,
+            -origin_x,
+            -origin_y,
         );
-
-        canvas.draw_text_clipped(
-            panel_x + scale.x(26),
-            panel_y + scale.y(94),
-            scale.w(300),
-            "Live HUD",
-            scale.font(15),
-            FontWeight::Semibold,
-            [234, 239, 247, 255],
-        );
-        canvas.draw_text_clipped(
-            panel_x + scale.x(26),
-            panel_y + scale.y(124),
-            scale.w(300),
-            "Drag a block. Size and scale apply to the selected block.",
-            scale.font(12),
-            FontWeight::Normal,
-            [151, 164, 184, 245],
-        );
-        canvas.draw_text_clipped(
-            panel_x + scale.x(26),
-            panel_y + scale.y(154),
-            scale.w(300),
-            &format!("Selected: {}", selected_element_label(selected_element)),
-            scale.font(13),
-            FontWeight::Semibold,
-            [220, 231, 246, 255],
-        );
-
-        let active = selected_element_settings(settings, selected_element);
-
-        draw_editor_row(
+        let (panel_screen_x, panel_screen_y) = editor_panel_origin(window_size, settings);
+        draw_compact_editor_bar(
             &mut canvas,
-            scale,
-            panel_x,
-            panel_y,
-            390,
-            88,
-            "Enabled",
-            settings.enabled,
-        );
-        draw_editor_row(
-            &mut canvas,
-            scale,
-            panel_x,
-            panel_y,
-            390,
-            132,
-            "Background",
-            active.show_background,
-        );
-        draw_editor_stepper(
-            &mut canvas,
-            scale,
-            panel_x,
-            panel_y,
-            390,
-            190,
-            "Opacity",
-            &editor_value_text(
-                editing_field,
-                edit_buffer,
-                EditorField::Opacity,
-                &format!("{:.0}%", settings.opacity * 100.0),
-            ),
-        );
-        draw_editor_stepper(
-            &mut canvas,
-            scale,
-            panel_x,
-            panel_y,
-            390,
-            244,
-            "Scale",
-            &editor_value_text(
-                editing_field,
-                edit_buffer,
-                EditorField::Scale,
-                &format!("{:.0}%", active.scale * 100.0),
-            ),
-        );
-        draw_editor_stepper(
-            &mut canvas,
-            scale,
-            panel_x,
-            panel_y,
-            390,
-            298,
-            "Text",
-            &editor_value_text(
-                editing_field,
-                edit_buffer,
-                EditorField::FontScale,
-                &format!("{:.0}%", active.font_scale * 100.0),
-            ),
-        );
-        draw_editor_stepper(
-            &mut canvas,
-            scale,
-            panel_x,
-            panel_y,
-            26,
-            318,
-            "X",
-            &editor_value_text(
-                editing_field,
-                edit_buffer,
-                EditorField::X,
-                &active.x.to_string(),
-            ),
-        );
-        draw_editor_stepper(
-            &mut canvas,
-            scale,
-            panel_x,
-            panel_y,
-            196,
-            318,
-            "Y",
-            &editor_value_text(
-                editing_field,
-                edit_buffer,
-                EditorField::Y,
-                &active.y.to_string(),
-            ),
-        );
-        draw_editor_stepper(
-            &mut canvas,
-            scale,
-            panel_x,
-            panel_y,
-            26,
-            372,
-            "Width",
-            &editor_value_text(
-                editing_field,
-                edit_buffer,
-                EditorField::Width,
-                &active.width.to_string(),
-            ),
-        );
-        draw_editor_stepper(
-            &mut canvas,
-            scale,
-            panel_x,
-            panel_y,
-            196,
-            372,
-            "Height",
-            &editor_value_text(
-                editing_field,
-                edit_buffer,
-                EditorField::Height,
-                &active.height.to_string(),
-            ),
-        );
-
-        draw_metric_toggle(
-            &mut canvas,
-            scale,
-            panel_x,
-            panel_y,
-            390,
-            372,
-            "PP",
-            settings.show_pp,
-        );
-        draw_metric_toggle(
-            &mut canvas,
-            scale,
-            panel_x,
-            panel_y,
-            472,
-            372,
-            "IF FC",
-            settings.show_if_fc,
-        );
-        draw_metric_toggle(
-            &mut canvas,
-            scale,
-            panel_x,
-            panel_y,
-            554,
-            372,
-            "ACC",
-            settings.show_accuracy,
-        );
-        draw_metric_toggle(
-            &mut canvas,
-            scale,
-            panel_x,
-            panel_y,
-            636,
-            372,
-            "Hits",
-            settings.show_hits,
-        );
-        draw_metric_toggle(
-            &mut canvas,
-            scale,
-            panel_x,
-            panel_y,
-            390,
-            420,
-            "Combo",
-            settings.show_combo,
-        );
-        draw_metric_toggle(
-            &mut canvas,
-            scale,
-            panel_x,
-            panel_y,
-            472,
-            420,
-            "Mods",
-            settings.show_mods,
-        );
-        draw_metric_toggle(
-            &mut canvas,
-            scale,
-            panel_x,
-            panel_y,
-            554,
-            420,
-            "Map",
-            settings.show_map,
+            panel_screen_x - origin_x,
+            panel_screen_y - origin_y,
+            settings,
+            selected_element,
         );
 
         canvas.into_bitmap()
@@ -1620,13 +2171,170 @@ mod windows {
 
     fn editor_panel_origin(
         window_size: Option<(u32, u32)>,
-        settings: &OverlaySettings,
+        _settings: &OverlaySettings,
     ) -> (i32, i32) {
         let (width, height) = window_size.unwrap_or((1280, 720));
         (
-            ((width as i32 - settings.editor_panel_width as i32) / 2).max(0),
-            ((height as i32 - settings.editor_panel_height as i32) / 2).max(0),
+            ((width as i32 - super::COMPACT_EDITOR_PANEL_WIDTH as i32) / 2).max(0),
+            (height as i32 - super::COMPACT_EDITOR_PANEL_HEIGHT as i32 - 24).max(0),
         )
+    }
+
+    struct EditorSurfaceLayout {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    }
+
+    fn editor_surface_layout(
+        settings: &OverlaySettings,
+        window_size: Option<(u32, u32)>,
+    ) -> EditorSurfaceLayout {
+        let (panel_x, panel_y) = editor_panel_origin(window_size, settings);
+        let (hud_x, hud_y, hud_width, hud_height) = overlay_bounds(settings);
+        let padding = 16;
+        let left = hud_x.min(panel_x).saturating_sub(padding).max(0);
+        let top = hud_y.min(panel_y).saturating_sub(padding).max(0);
+        let right = (hud_x + hud_width as i32)
+            .max(panel_x + super::COMPACT_EDITOR_PANEL_WIDTH as i32)
+            .saturating_add(padding);
+        let bottom = (hud_y + hud_height as i32)
+            .max(panel_y + super::COMPACT_EDITOR_PANEL_HEIGHT as i32)
+            .saturating_add(padding);
+
+        EditorSurfaceLayout {
+            x: left,
+            y: top,
+            width: right.saturating_sub(left).max(1) as u32,
+            height: bottom.saturating_sub(top).max(1) as u32,
+        }
+    }
+
+    fn draw_compact_editor_bar(
+        canvas: &mut BitmapCanvas,
+        x: i32,
+        y: i32,
+        settings: &OverlaySettings,
+        selected_element: OverlayElement,
+    ) {
+        canvas.fill_rounded_rect(
+            x,
+            y,
+            super::COMPACT_EDITOR_PANEL_WIDTH as i32,
+            super::COMPACT_EDITOR_PANEL_HEIGHT as i32,
+            10,
+            [10, 14, 20, 236],
+        );
+        canvas.stroke_rounded_rect(
+            x,
+            y,
+            super::COMPACT_EDITOR_PANEL_WIDTH as i32,
+            super::COMPACT_EDITOR_PANEL_HEIGHT as i32,
+            10,
+            [120, 138, 166, 120],
+        );
+        canvas.draw_text_clipped(
+            x + 16,
+            y + 14,
+            112,
+            "Overlay",
+            14,
+            FontWeight::Semibold,
+            [243, 247, 252, 255],
+        );
+        canvas.draw_text_clipped(
+            x + 16,
+            y + 38,
+            122,
+            selected_element_label(selected_element),
+            11,
+            FontWeight::Semibold,
+            [164, 181, 205, 245],
+        );
+
+        for (element, bx, label, enabled) in [
+            (OverlayElement::Pp, 148, "PP", settings.show_pp),
+            (
+                OverlayElement::Stats,
+                216,
+                "Stats",
+                settings.show_if_fc
+                    || settings.show_accuracy
+                    || settings.show_combo
+                    || settings.show_mods,
+            ),
+            (OverlayElement::Hits, 296, "Hits", settings.show_hits),
+            (OverlayElement::Map, 372, "Map", settings.show_map),
+        ] {
+            let active = selected_element == element;
+            let color = if active {
+                [126, 190, 255, 245]
+            } else if enabled {
+                [38, 112, 78, 232]
+            } else {
+                [30, 38, 50, 232]
+            };
+            canvas.fill_rounded_rect(x + bx, y + 14, 62, 34, 7, color);
+            canvas.stroke_rounded_rect(x + bx, y + 14, 62, 34, 7, [190, 210, 238, 70]);
+            canvas.draw_text_clipped(
+                x + bx + 10,
+                y + 24,
+                44,
+                label,
+                12,
+                FontWeight::Semibold,
+                if active {
+                    [8, 17, 28, 255]
+                } else {
+                    [236, 242, 250, 255]
+                },
+            );
+        }
+
+        draw_compact_toggle(
+            canvas,
+            x + 462,
+            y + 14,
+            "BG",
+            selected_element_settings(settings, selected_element).show_background,
+        );
+        draw_compact_toggle(canvas, x + 518, y + 14, "HUD", settings.enabled);
+        canvas.fill_rounded_rect(x + 612, y + 14, 52, 28, 7, [44, 52, 66, 238]);
+        canvas.draw_text_clipped(
+            x + 624,
+            y + 22,
+            32,
+            "Done",
+            11,
+            FontWeight::Semibold,
+            [240, 244, 250, 255],
+        );
+    }
+
+    fn draw_compact_toggle(canvas: &mut BitmapCanvas, x: i32, y: i32, label: &str, enabled: bool) {
+        canvas.fill_rounded_rect(
+            x,
+            y,
+            44,
+            28,
+            7,
+            if enabled {
+                [38, 112, 78, 238]
+            } else {
+                [30, 38, 50, 238]
+            },
+        );
+        canvas.stroke_rounded_rect(x, y, 44, 28, 7, [190, 210, 238, 62]);
+        canvas.draw_text_clipped(
+            x + 8,
+            y + 8,
+            28,
+            label,
+            11,
+            FontWeight::Semibold,
+            [238, 243, 250, 255],
+        );
     }
 
     fn draw_editor_button(
@@ -1644,8 +2352,8 @@ mod windows {
         let y = panel_y + scale.y(y);
         let w = scale.w(w);
         let h = scale.h(h);
-        canvas.fill_rounded_rect(x, y, w, h, scale.font(10), [35, 41, 52, 235]);
-        canvas.stroke_rounded_rect(x, y, w, h, scale.font(10), [94, 107, 130, 130]);
+        canvas.fill_rounded_rect(x, y, w, h, scale.font(9), [34, 42, 55, 238]);
+        canvas.stroke_rounded_rect(x, y, w, h, scale.font(9), [116, 132, 156, 120]);
         canvas.draw_text_clipped(
             x + scale.x(14),
             y + scale.y(8),
@@ -1653,7 +2361,46 @@ mod windows {
             label,
             scale.font(13),
             FontWeight::Semibold,
-            [234, 239, 247, 255],
+            [242, 246, 252, 255],
+        );
+    }
+
+    fn draw_status_chip(
+        canvas: &mut BitmapCanvas,
+        scale: EditorPanelScale,
+        panel_x: i32,
+        panel_y: i32,
+        x: i32,
+        y: i32,
+        w: i32,
+        label: &str,
+        enabled: bool,
+    ) {
+        let x = panel_x + scale.x(x);
+        let y = panel_y + scale.y(y);
+        let w = scale.w(w);
+        let h = scale.h(32);
+        canvas.fill_rounded_rect(
+            x,
+            y,
+            w,
+            h,
+            scale.font(9),
+            if enabled {
+                [34, 95, 68, 230]
+            } else {
+                [70, 44, 48, 230]
+            },
+        );
+        canvas.stroke_rounded_rect(x, y, w, h, scale.font(9), [132, 154, 176, 88]);
+        canvas.draw_text_clipped(
+            x + scale.x(14),
+            y + scale.y(8),
+            w - scale.w(28),
+            label,
+            scale.font(12),
+            FontWeight::Semibold,
+            [238, 245, 250, 255],
         );
     }
 
@@ -1686,9 +2433,9 @@ mod windows {
             scale.h(24),
             scale.font(12),
             if enabled {
-                [42, 160, 88, 230]
+                [36, 124, 82, 235]
             } else {
-                [40, 46, 58, 230]
+                [38, 45, 58, 235]
             },
         );
         canvas.stroke_rounded_rect(
@@ -1697,7 +2444,7 @@ mod windows {
             scale.w(44),
             scale.h(24),
             scale.font(12),
-            [100, 116, 145, 95],
+            [120, 138, 164, 92],
         );
         canvas.fill_rounded_rect(
             if enabled {
@@ -1709,7 +2456,7 @@ mod windows {
             scale.w(18),
             scale.h(18),
             scale.font(9),
-            [238, 243, 250, 245],
+            [241, 246, 251, 248],
         );
     }
 
@@ -1732,7 +2479,7 @@ mod windows {
             label,
             scale.font(12),
             FontWeight::Semibold,
-            [151, 164, 184, 245],
+            [168, 181, 202, 245],
         );
         draw_editor_button(canvas, scale, panel_x, panel_y, x, y + 20, 34, 30, "-");
         canvas.fill_rounded_rect(
@@ -1741,7 +2488,7 @@ mod windows {
             scale.w(76),
             scale.h(30),
             scale.font(9),
-            [28, 34, 44, 230],
+            [22, 29, 39, 238],
         );
         canvas.stroke_rounded_rect(
             actual_x + scale.x(42),
@@ -1749,7 +2496,7 @@ mod windows {
             scale.w(76),
             scale.h(30),
             scale.font(9),
-            [82, 96, 120, 115],
+            [105, 122, 148, 112],
         );
         canvas.draw_text_clipped(
             actual_x + scale.x(50),
@@ -1790,11 +2537,11 @@ mod windows {
             y,
             scale.w(72),
             scale.h(34),
-            scale.font(10),
+            scale.font(9),
             if enabled {
-                [42, 160, 88, 230]
+                [37, 112, 79, 238]
             } else {
-                [32, 38, 48, 230]
+                [31, 38, 50, 238]
             },
         );
         canvas.stroke_rounded_rect(
@@ -1803,7 +2550,11 @@ mod windows {
             scale.w(72),
             scale.h(34),
             scale.font(10),
-            [95, 113, 142, 125],
+            if enabled {
+                [95, 180, 136, 132]
+            } else {
+                [94, 112, 140, 105]
+            },
         );
         canvas.draw_text_clipped(
             x + scale.x(12),
@@ -1834,20 +2585,7 @@ mod windows {
     }
 
     fn editor_value_field_at(x: i32, y: i32) -> Option<EditorField> {
-        for (field, sx, sy) in [
-            (EditorField::Opacity, 390, 190),
-            (EditorField::Scale, 390, 244),
-            (EditorField::FontScale, 390, 298),
-            (EditorField::X, 26, 318),
-            (EditorField::Y, 196, 318),
-            (EditorField::Width, 26, 372),
-            (EditorField::Height, 196, 372),
-        ] {
-            if in_rect(x, y, sx + 42, sy + 20, 76, 30) {
-                return Some(field);
-            }
-        }
-
+        let _ = (x, y);
         None
     }
 
@@ -1919,28 +2657,42 @@ mod windows {
         x: i32,
         y: i32,
     ) -> bool {
-        for (element, bx, by) in [
-            (OverlayElement::Pp, 390, 372),
-            (OverlayElement::Stats, 472, 372),
-            (OverlayElement::Hits, 636, 372),
-            (OverlayElement::Map, 554, 420),
+        for (element, bx) in [
+            (OverlayElement::Pp, 148),
+            (OverlayElement::Stats, 216),
+            (OverlayElement::Hits, 296),
+            (OverlayElement::Map, 372),
         ] {
-            if in_rect(x, y, bx, by, 72, 34) {
+            if in_rect(x, y, bx, 14, 62, 34) {
                 if *selected_element == element {
                     match element {
-                        OverlayElement::Pp => settings.show_pp = !settings.show_pp,
+                        OverlayElement::Pp => {
+                            let next = !(settings.show_pp && settings.pp_panel.enabled);
+                            settings.show_pp = next;
+                            settings.pp_panel.enabled = next;
+                        }
                         OverlayElement::Stats => {
-                            let next = !(settings.show_if_fc
-                                || settings.show_accuracy
-                                || settings.show_combo
-                                || settings.show_mods);
+                            let next = !(settings.stats_panel.enabled
+                                && (settings.show_if_fc
+                                    || settings.show_accuracy
+                                    || settings.show_combo
+                                    || settings.show_mods));
+                            settings.stats_panel.enabled = next;
                             settings.show_if_fc = next;
                             settings.show_accuracy = next;
                             settings.show_combo = next;
                             settings.show_mods = next;
                         }
-                        OverlayElement::Hits => settings.show_hits = !settings.show_hits,
-                        OverlayElement::Map => settings.show_map = !settings.show_map,
+                        OverlayElement::Hits => {
+                            let next = !(settings.show_hits && settings.hits_panel.enabled);
+                            settings.show_hits = next;
+                            settings.hits_panel.enabled = next;
+                        }
+                        OverlayElement::Map => {
+                            let next = !(settings.show_map && settings.map_panel.enabled);
+                            settings.show_map = next;
+                            settings.map_panel.enabled = next;
+                        }
                         OverlayElement::Whole => {}
                     }
                 } else {
@@ -1950,99 +2702,13 @@ mod windows {
             }
         }
 
-        if in_rect(x, y, 628, 88, 44, 24) {
-            settings.enabled = !settings.enabled;
-            return true;
-        }
-        if in_rect(x, y, 628, 132, 44, 24) {
+        if in_rect(x, y, 462, 14, 44, 28) {
             let element = selected_element_settings_mut(settings, *selected_element);
             element.show_background = !element.show_background;
             return true;
         }
-        if stepper_click(x, y, 390, 190) == Some(-1) {
-            settings.opacity -= 0.05;
-            return true;
-        }
-        if stepper_click(x, y, 390, 190) == Some(1) {
-            settings.opacity += 0.05;
-            return true;
-        }
-        if stepper_click(x, y, 390, 244) == Some(-1) {
-            selected_element_settings_mut(settings, *selected_element).scale -= 0.05;
-            return true;
-        }
-        if stepper_click(x, y, 390, 244) == Some(1) {
-            selected_element_settings_mut(settings, *selected_element).scale += 0.05;
-            return true;
-        }
-        if stepper_click(x, y, 390, 298) == Some(-1) {
-            selected_element_settings_mut(settings, *selected_element).font_scale -= 0.05;
-            return true;
-        }
-        if stepper_click(x, y, 390, 298) == Some(1) {
-            selected_element_settings_mut(settings, *selected_element).font_scale += 0.05;
-            return true;
-        }
-        if stepper_click(x, y, 26, 318) == Some(-1) {
-            selected_element_settings_mut(settings, *selected_element).x -= 5;
-            return true;
-        }
-        if stepper_click(x, y, 26, 318) == Some(1) {
-            selected_element_settings_mut(settings, *selected_element).x += 5;
-            return true;
-        }
-        if stepper_click(x, y, 196, 318) == Some(-1) {
-            selected_element_settings_mut(settings, *selected_element).y -= 5;
-            return true;
-        }
-        if stepper_click(x, y, 196, 318) == Some(1) {
-            selected_element_settings_mut(settings, *selected_element).y += 5;
-            return true;
-        }
-        if stepper_click(x, y, 26, 372) == Some(-1) {
-            let element = selected_element_settings_mut(settings, *selected_element);
-            element.width = element.width.saturating_sub(10);
-            return true;
-        }
-        if stepper_click(x, y, 26, 372) == Some(1) {
-            selected_element_settings_mut(settings, *selected_element).width += 10;
-            return true;
-        }
-        if stepper_click(x, y, 196, 372) == Some(-1) {
-            let element = selected_element_settings_mut(settings, *selected_element);
-            element.height = element.height.saturating_sub(10);
-            return true;
-        }
-        if stepper_click(x, y, 196, 372) == Some(1) {
-            selected_element_settings_mut(settings, *selected_element).height += 10;
-            return true;
-        }
-        if in_rect(x, y, 390, 372, 72, 34) {
-            settings.show_pp = !settings.show_pp;
-            return true;
-        }
-        if in_rect(x, y, 472, 372, 72, 34) {
-            settings.show_if_fc = !settings.show_if_fc;
-            return true;
-        }
-        if in_rect(x, y, 554, 372, 72, 34) {
-            settings.show_accuracy = !settings.show_accuracy;
-            return true;
-        }
-        if in_rect(x, y, 636, 372, 72, 34) {
-            settings.show_hits = !settings.show_hits;
-            return true;
-        }
-        if in_rect(x, y, 390, 420, 72, 34) {
-            settings.show_combo = !settings.show_combo;
-            return true;
-        }
-        if in_rect(x, y, 472, 420, 72, 34) {
-            settings.show_mods = !settings.show_mods;
-            return true;
-        }
-        if in_rect(x, y, 554, 420, 72, 34) {
-            settings.show_map = !settings.show_map;
+        if in_rect(x, y, 518, 14, 44, 28) {
+            settings.enabled = !settings.enabled;
             return true;
         }
         false
@@ -2102,10 +2768,12 @@ mod windows {
                 continue;
             }
 
-            left = left.min(element.x);
-            top = top.min(element.y);
-            right = right.max(element.x + element.width as i32);
-            bottom = bottom.max(element.y + element.height as i32);
+            let element_left = settings.offset_x.saturating_add(element.x);
+            let element_top = settings.offset_y.saturating_add(element.y);
+            left = left.min(element_left);
+            top = top.min(element_top);
+            right = right.max(element_left + element.width as i32);
+            bottom = bottom.max(element_top + element.height as i32);
         }
 
         (
@@ -2120,7 +2788,7 @@ mod windows {
         settings: &OverlaySettings,
         x: i32,
         y: i32,
-    ) -> Option<(OverlayElement, i32, i32)> {
+    ) -> Option<(OverlayElement, DragMode, i32, i32, u32, u32)> {
         for (element, item) in [
             (OverlayElement::Map, &settings.map_panel),
             (OverlayElement::Hits, &settings.hits_panel),
@@ -2139,11 +2807,28 @@ mod windows {
                 OverlayElement::Map => settings.show_map,
                 OverlayElement::Whole => true,
             };
+            let element_x = settings.offset_x.saturating_add(item.x);
+            let element_y = settings.offset_y.saturating_add(item.y);
             if visible
                 && item.enabled
-                && in_rect(x, y, item.x, item.y, item.width as i32, item.height as i32)
+                && in_rect(
+                    x,
+                    y,
+                    element_x,
+                    element_y,
+                    item.width as i32,
+                    item.height as i32,
+                )
             {
-                return Some((element, item.x, item.y));
+                let edge = 18;
+                let near_right = x >= element_x + item.width as i32 - edge;
+                let near_bottom = y >= element_y + item.height as i32 - edge;
+                let mode = if near_right || near_bottom {
+                    DragMode::Resize
+                } else {
+                    DragMode::Move
+                };
+                return Some((element, mode, item.x, item.y, item.width, item.height));
             }
         }
 
@@ -2155,10 +2840,37 @@ mod windows {
             settings.width as i32,
             settings.height as i32,
         ) {
-            return Some((OverlayElement::Whole, settings.offset_x, settings.offset_y));
+            return Some((
+                OverlayElement::Whole,
+                DragMode::Move,
+                settings.offset_x,
+                settings.offset_y,
+                settings.width,
+                settings.height,
+            ));
         }
 
         None
+    }
+
+    fn apply_overlay_drag(
+        settings: &mut OverlaySettings,
+        drag: DragOrigin,
+        delta_x: i32,
+        delta_y: i32,
+        next_x: i32,
+        next_y: i32,
+    ) {
+        match drag.mode {
+            DragMode::Move => set_overlay_element_position(settings, drag.element, next_x, next_y),
+            DragMode::Resize => {
+                let next_width = (drag.width as i32 + delta_x).max(24) as u32;
+                let next_height = (drag.height as i32 + delta_y).max(14) as u32;
+                let element = selected_element_settings_mut(settings, drag.element);
+                element.width = next_width;
+                element.height = next_height;
+            }
+        }
     }
 
     fn set_overlay_element_position(
@@ -2229,16 +2941,30 @@ mod windows {
         canvas: &mut BitmapCanvas,
         settings: &OverlaySettings,
         element: OverlayElement,
+        offset_x: i32,
+        offset_y: i32,
     ) {
         let item = selected_element_settings(settings, element);
         canvas.stroke_rounded_rect(
-            item.x - 2,
-            item.y - 2,
+            settings.offset_x + item.x + offset_x - 2,
+            settings.offset_y + item.y + offset_y - 2,
             item.width as i32 + 4,
             item.height as i32 + 4,
             8,
-            [255, 224, 92, 230],
+            [112, 183, 255, 238],
         );
+        let left = settings.offset_x + item.x + offset_x;
+        let top = settings.offset_y + item.y + offset_y;
+        let right = left + item.width as i32;
+        let bottom = top + item.height as i32;
+        for (x, y) in [
+            (right - 5, top + item.height as i32 / 2 - 5),
+            (left + item.width as i32 / 2 - 5, bottom - 5),
+            (right - 5, bottom - 5),
+        ] {
+            canvas.fill_rounded_rect(x, y, 10, 10, 4, [112, 183, 255, 245]);
+            canvas.stroke_rounded_rect(x, y, 10, 10, 4, [10, 15, 24, 180]);
+        }
     }
 
     fn draw_overlay_elements(
@@ -2271,8 +2997,8 @@ mod windows {
         if settings.show_pp && settings.pp_panel.enabled {
             draw_single_panel_text(
                 canvas,
-                settings.pp_panel.x + offset_x,
-                settings.pp_panel.y + offset_y,
+                settings.offset_x + settings.pp_panel.x + offset_x,
+                settings.offset_y + settings.pp_panel.y + offset_y,
                 settings.pp_panel.width,
                 settings.pp_panel.height,
                 settings.pp_panel.scale,
@@ -2334,8 +3060,8 @@ mod windows {
         if settings.show_map && settings.map_panel.enabled {
             draw_single_panel_text(
                 canvas,
-                settings.map_panel.x + offset_x,
-                settings.map_panel.y + offset_y,
+                settings.offset_x + settings.map_panel.x + offset_x,
+                settings.offset_y + settings.map_panel.y + offset_y,
                 settings.map_panel.width,
                 settings.map_panel.height,
                 settings.map_panel.scale,
@@ -2362,16 +3088,24 @@ mod windows {
     ) {
         if show_background {
             canvas.fill_rounded_rect(
+                x + 1,
+                y + 2,
+                width as i32,
+                height as i32,
+                8,
+                [0, 0, 0, (settings.opacity * 58.0).clamp(0.0, 78.0) as u8],
+            );
+            canvas.fill_rounded_rect(
                 x,
                 y,
                 width as i32,
                 height as i32,
-                7,
+                8,
                 [
-                    18,
-                    22,
-                    30,
-                    (settings.opacity * 224.0).clamp(0.0, 238.0) as u8,
+                    12,
+                    16,
+                    24,
+                    (settings.opacity * 172.0).clamp(0.0, 202.0) as u8,
                 ],
             );
             canvas.stroke_rounded_rect(
@@ -2379,12 +3113,12 @@ mod windows {
                 y,
                 width as i32,
                 height as i32,
-                7,
+                8,
                 [
-                    92,
-                    108,
-                    134,
-                    (settings.opacity * 110.0).clamp(0.0, 150.0) as u8,
+                    225,
+                    235,
+                    248,
+                    (settings.opacity * 82.0).clamp(0.0, 118.0) as u8,
                 ],
             );
         }
@@ -2404,23 +3138,68 @@ mod windows {
         color: [u8; 4],
     ) {
         draw_panel_shell(canvas, x, y, width, height, settings, show_background);
-        let inset = 5;
+        if show_background {
+            canvas.fill_rounded_rect(
+                x + 2,
+                y + 2,
+                3,
+                height as i32 - 4,
+                5,
+                [
+                    91,
+                    177,
+                    255,
+                    (settings.opacity * 210.0).clamp(0.0, 235.0) as u8,
+                ],
+            );
+            canvas.fill_rounded_rect(
+                x + 6,
+                y + 2,
+                (width as i32 - 8).max(1),
+                (height as i32 / 2).max(1),
+                7,
+                [
+                    255,
+                    255,
+                    255,
+                    (settings.opacity * 18.0).clamp(0.0, 34.0) as u8,
+                ],
+            );
+        }
+        let inset = 8;
         let max_font_by_height = ((height as i32 - inset * 2) as f64 / 1.35).floor() as i32;
+        let pp_text = text.strip_suffix(" PP");
+        let main_text = pp_text.unwrap_or(text);
         let max_font_by_width =
-            ((width as f64 - inset as f64 * 2.0) / text.len().max(1) as f64 * 1.75).floor() as i32;
+            ((width as f64 - inset as f64 * 2.0 - if pp_text.is_some() { 17.0 } else { 0.0 })
+                / main_text.len().max(1) as f64
+                * 1.78)
+                .floor() as i32;
         let font = ((20.0 * scale * font_scale).round() as i32)
             .min(max_font_by_height)
             .min(max_font_by_width)
             .clamp(6, 28);
+        let text_y = y + ((height as i32 - font) / 2).max(1) - 2;
         canvas.draw_text_clipped(
             x + inset,
-            y + ((height as i32 - font) / 2).max(1) - 2,
+            text_y,
             width as i32 - inset * 2,
-            text,
+            main_text,
             font,
             FontWeight::Bold,
             color,
         );
+        if pp_text.is_some() {
+            canvas.draw_text_clipped(
+                x + width as i32 - 22,
+                text_y + (font / 3).max(2),
+                18,
+                "PP",
+                (font / 2).clamp(6, 10),
+                FontWeight::Semibold,
+                [176, 207, 246, 245],
+            );
+        }
     }
 
     fn draw_separate_metric_panel(
@@ -2435,8 +3214,8 @@ mod windows {
             return;
         }
 
-        let x = element.x + offset_x;
-        let y = element.y + offset_y;
+        let x = settings.offset_x + element.x + offset_x;
+        let y = settings.offset_y + element.y + offset_y;
         draw_panel_shell(
             canvas,
             x,
@@ -2447,38 +3226,56 @@ mod windows {
             element.show_background,
         );
         let columns = cells.len().max(1) as i32;
-        let gap = 3;
-        let cell_width = ((element.width as i32 - 8 - gap * (columns - 1)) / columns).max(12);
-        let available_height = element.height as i32 - 6;
+        let gap = 2;
+        let cell_width = ((element.width as i32 - 6 - gap * (columns - 1)) / columns).max(12);
+        let available_height = element.height as i32 - 5;
         let label_font =
-            ((available_height as f64 * 0.32 * element.font_scale).round() as i32).clamp(5, 11);
+            ((available_height as f64 * 0.3 * element.font_scale).round() as i32).clamp(5, 10);
         let value_font =
-            ((available_height as f64 * 0.46 * element.font_scale).round() as i32).clamp(6, 14);
+            ((available_height as f64 * 0.5 * element.font_scale).round() as i32).clamp(6, 15);
 
         for (index, (label, value)) in cells.iter().enumerate() {
-            let cell_x = x + 4 + index as i32 * (cell_width + gap);
+            let cell_x = x + 3 + index as i32 * (cell_width + gap);
             if element.show_background {
                 canvas.fill_rounded_rect(
                     cell_x,
-                    y + 4,
+                    y + 3,
                     cell_width,
-                    element.height as i32 - 8,
-                    5,
-                    [26, 32, 43, 120],
+                    element.height as i32 - 6,
+                    6,
+                    [
+                        18,
+                        26,
+                        38,
+                        (settings.opacity * 108.0).clamp(0.0, 145.0) as u8,
+                    ],
+                );
+                canvas.stroke_rounded_rect(
+                    cell_x,
+                    y + 3,
+                    cell_width,
+                    element.height as i32 - 6,
+                    6,
+                    [
+                        210,
+                        225,
+                        245,
+                        (settings.opacity * 34.0).clamp(0.0, 54.0) as u8,
+                    ],
                 );
             }
             canvas.draw_text_clipped(
                 cell_x + 3,
-                y + 5,
+                y + 4,
                 cell_width - 6,
                 label,
                 label_font.min((element.height as i32 / 3).max(5)),
                 FontWeight::Semibold,
-                [178, 193, 216, 245],
+                [160, 181, 210, 245],
             );
             canvas.draw_text_clipped(
                 cell_x + 3,
-                y + 6 + label_font,
+                y + 5 + label_font,
                 cell_width - 6,
                 value,
                 value_font.min((element.height as i32 - label_font - 9).max(6)),
@@ -2496,8 +3293,8 @@ mod windows {
         settings: &OverlaySettings,
         hits: &crate::models::HitSnapshot,
     ) {
-        let x = element.x + offset_x;
-        let y = element.y + offset_y;
+        let x = settings.offset_x + element.x + offset_x;
+        let y = settings.offset_y + element.y + offset_y;
         draw_panel_shell(
             canvas,
             x,
@@ -2508,25 +3305,43 @@ mod windows {
             element.show_background,
         );
         let parts = [
-            ("100", hits.n100, [92, 170, 255, 255], [37, 82, 148, 180]),
-            ("50", hits.n50, [255, 190, 86, 255], [145, 83, 31, 180]),
-            ("MISS", hits.misses, [255, 91, 112, 255], [152, 39, 55, 180]),
+            ("100", hits.n100, [178, 222, 255, 255], [31, 96, 164, 170]),
+            ("50", hits.n50, [255, 214, 132, 255], [174, 103, 22, 166]),
+            (
+                "MISS",
+                hits.misses,
+                [255, 154, 166, 255],
+                [178, 45, 67, 170],
+            ),
             (
                 "SB",
                 hits.slider_breaks,
-                [190, 132, 255, 255],
-                [102, 66, 160, 180],
+                [213, 174, 255, 255],
+                [102, 66, 160, 168],
             ),
         ];
-        let gap = 3;
-        let cell_width = ((element.width as i32 - 8 - gap * 3) / 4).max(10);
-        let cell_height = (element.height as i32 - 8).max(10);
-        let font = ((cell_height as f64 * 0.62 * element.font_scale).round() as i32).clamp(5, 12);
+        let gap = 2;
+        let cell_width = ((element.width as i32 - 6 - gap * 3) / 4).max(10);
+        let cell_height = (element.height as i32 - 6).max(10);
+        let font = ((cell_height as f64 * 0.58 * element.font_scale).round() as i32).clamp(5, 12);
 
         for (index, (label, value, color, bg)) in parts.into_iter().enumerate() {
-            let cell_x = x + 4 + index as i32 * (cell_width + gap);
+            let cell_x = x + 3 + index as i32 * (cell_width + gap);
             if element.show_background {
-                canvas.fill_rounded_rect(cell_x, y + 4, cell_width, cell_height, 5, bg);
+                canvas.fill_rounded_rect(cell_x, y + 3, cell_width, cell_height, 6, bg);
+                canvas.stroke_rounded_rect(
+                    cell_x,
+                    y + 3,
+                    cell_width,
+                    cell_height,
+                    6,
+                    [
+                        255,
+                        255,
+                        255,
+                        (settings.opacity * 42.0).clamp(0.0, 68.0) as u8,
+                    ],
+                );
             }
             canvas.draw_text_clipped(
                 cell_x + 2,
@@ -3105,16 +3920,31 @@ mod windows {
         dx * dx + dy * dy <= radius * radius
     }
 
-    fn window_covers_monitor(hwnd: HWND, window_rect: &RECT) -> bool {
-        let Some(monitor_rect) = monitor_rect_for_window(hwnd) else {
-            return false;
-        };
-        let tolerance = 2;
+    fn window_covers_monitor_rect(window_rect: &RECT, monitor_rect: &RECT) -> bool {
+        let tolerance = 24;
 
-        (window_rect.left - monitor_rect.left).abs() <= tolerance
-            && (window_rect.top - monitor_rect.top).abs() <= tolerance
-            && (window_rect.right - monitor_rect.right).abs() <= tolerance
-            && (window_rect.bottom - monitor_rect.bottom).abs() <= tolerance
+        rect_covers_monitor(window_rect, &monitor_rect, tolerance)
+            || rect_area_overlap_ratio(window_rect, monitor_rect) >= 0.92
+    }
+
+    fn rect_covers_monitor(rect: &RECT, monitor_rect: &RECT, tolerance: i32) -> bool {
+        (rect.left - monitor_rect.left).abs() <= tolerance
+            && (rect.top - monitor_rect.top).abs() <= tolerance
+            && (rect.right - monitor_rect.right).abs() <= tolerance
+            && (rect.bottom - monitor_rect.bottom).abs() <= tolerance
+    }
+
+    fn rect_area_overlap_ratio(rect: &RECT, monitor_rect: &RECT) -> f64 {
+        let left = rect.left.max(monitor_rect.left);
+        let top = rect.top.max(monitor_rect.top);
+        let right = rect.right.min(monitor_rect.right);
+        let bottom = rect.bottom.min(monitor_rect.bottom);
+        let intersection_width = right.saturating_sub(left).max(0) as f64;
+        let intersection_height = bottom.saturating_sub(top).max(0) as f64;
+        let monitor_width = monitor_rect.right.saturating_sub(monitor_rect.left).max(1) as f64;
+        let monitor_height = monitor_rect.bottom.saturating_sub(monitor_rect.top).max(1) as f64;
+
+        (intersection_width * intersection_height) / (monitor_width * monitor_height)
     }
 
     fn monitor_rect_for_window(hwnd: HWND) -> Option<RECT> {

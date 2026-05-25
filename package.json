@@ -1,7 +1,7 @@
 {
   "name": "osuwapp",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "tauri": "tauri",
+    "tosu-overlay": "electron ./scripts/tosu-overlay/main.mjs",
     "cargo:check:win": "powershell -ExecutionPolicy Bypass -File ./scripts/Invoke-VsDevCommand.ps1 \"cargo check --manifest-path src-tauri/Cargo.toml\"",
     "tauri:dev": "powershell -ExecutionPolicy Bypass -File ./scripts/Invoke-VsDevCommand.ps1 \"npm exec tauri dev\"",
     "tauri:build": "powershell -ExecutionPolicy Bypass -File ./scripts/Invoke-VsDevCommand.ps1 \"npm exec tauri build\""
@@ -20,12 +21,15 @@
     "react-dom": "^19.2.5"
   },
   "devDependencies": {
+    "@asdf-overlay/core": "^1.2.2",
+    "@asdf-overlay/electron": "^1.2.2",
     "@eslint/js": "^10.0.1",
     "@tauri-apps/cli": "^2.10.1",
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
+    "electron": "^40.10.0",
     "esbuild": "^0.28.0",
     "eslint": "^10.2.1",
     "eslint-plugin-react-hooks": "^7.1.1",

@@ -112,6 +112,8 @@ export interface SessionSnapshot {
 export interface RecentPlaySnapshot {
   timestampMs: number
   title: string
+  beatmapPath?: string | null
+  coverPath?: string | null
   modsText: string
   accuracy: number
   combo: number

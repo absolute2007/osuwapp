@@ -7,6 +7,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
 import { invoke } from '@tauri-apps/api/core'
@@ -18,6 +19,7 @@ import './App.css'
 import { initialSnapshot } from './mockSnapshot'
 import type {
   AppSnapshot,
+  OverlayElementSettings,
   OverlaySettings,
   RecentPlaySnapshot,
   SessionSnapshot,
@@ -28,6 +30,30 @@ const OVERLAY_SETTINGS_EVENT = 'overlay-settings-updated'
 const OPEN_OVERLAY_SETTINGS_EVENT = 'open-overlay-settings'
 const MAX_GRAPH_POINTS = 96
 const integerFormatter = new Intl.NumberFormat('en-US')
+const RECENT_PLAY_LIMIT = 30
+type OverlayPanelKey = keyof Pick<OverlaySettings, 'ppPanel' | 'statsPanel' | 'hitsPanel' | 'mapPanel'>
+
+const compactOverlayPanels = {
+  ppPanel: { enabled: true, showBackground: true, x: 0, y: 0, width: 106, height: 34, scale: 1, fontScale: 1 },
+  statsPanel: { enabled: true, showBackground: true, x: 112, y: 0, width: 168, height: 34, scale: 1, fontScale: 1 },
+  hitsPanel: { enabled: true, showBackground: true, x: 0, y: 38, width: 280, height: 24, scale: 1, fontScale: 1 },
+  mapPanel: { enabled: false, showBackground: true, x: 0, y: 66, width: 360, height: 24, scale: 1, fontScale: 1 },
+} satisfies Pick<OverlaySettings, 'ppPanel' | 'statsPanel' | 'hitsPanel' | 'mapPanel'>
+
+const tournamentOverlayPanels = {
+  ppPanel: { enabled: true, showBackground: true, x: 0, y: 0, width: 150, height: 42, scale: 1.06, fontScale: 1.05 },
+  statsPanel: { enabled: true, showBackground: true, x: 158, y: 0, width: 238, height: 42, scale: 1, fontScale: 1 },
+  hitsPanel: { enabled: true, showBackground: true, x: 0, y: 48, width: 396, height: 28, scale: 1, fontScale: 1 },
+  mapPanel: { enabled: true, showBackground: true, x: 0, y: 82, width: 396, height: 24, scale: 1, fontScale: 1 },
+} satisfies Pick<OverlaySettings, 'ppPanel' | 'statsPanel' | 'hitsPanel' | 'mapPanel'>
+
+const minimalOverlayPanels = {
+  ppPanel: { enabled: true, showBackground: true, x: 0, y: 0, width: 104, height: 30, scale: 1, fontScale: 0.94 },
+  statsPanel: { enabled: true, showBackground: true, x: 110, y: 0, width: 156, height: 30, scale: 1, fontScale: 0.92 },
+  hitsPanel: { enabled: true, showBackground: true, x: 0, y: 34, width: 266, height: 22, scale: 1, fontScale: 0.9 },
+  mapPanel: { enabled: false, showBackground: true, x: 0, y: 60, width: 266, height: 22, scale: 1, fontScale: 0.9 },
+} satisfies Pick<OverlaySettings, 'ppPanel' | 'statsPanel' | 'hitsPanel' | 'mapPanel'>
+
 const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
   enabled: true,
   showPp: true,
@@ -35,29 +61,39 @@ const DEFAULT_OVERLAY_SETTINGS: OverlaySettings = {
   showAccuracy: true,
   showCombo: true,
   showMods: true,
-  showMap: true,
+  showMap: false,
   showHits: true,
-  width: 420,
-  height: 248,
+  width: 280,
+  height: 62,
   offsetX: 24,
   offsetY: 24,
-  scale: 0.82,
-  fontScale: 0.9,
-  padding: 8,
-  cornerRadius: 12,
-  opacity: 0.92,
+  scale: 1,
+  fontScale: 1,
+  padding: 0,
+  cornerRadius: 10,
+  opacity: 0.9,
   showBackground: true,
   toggleKey: 'Insert',
   editorPanelWidth: 760,
   editorPanelHeight: 520,
   dataUpdateIntervalMs: 90,
-  ppPanel: { enabled: true, showBackground: true, x: 0, y: 0, width: 220, height: 40, scale: 1, fontScale: 1 },
-  statsPanel: { enabled: true, showBackground: true, x: 0, y: 42, width: 220, height: 34, scale: 1, fontScale: 1 },
-  hitsPanel: { enabled: true, showBackground: true, x: 0, y: 78, width: 220, height: 22, scale: 1, fontScale: 1 },
-  mapPanel: { enabled: true, showBackground: true, x: 0, y: 104, width: 360, height: 24, scale: 1, fontScale: 1 },
+  ...compactOverlayPanels,
 }
 
 type AppView = 'session' | 'recent' | 'overlay' | 'settings' | 'about'
+
+type PerformanceSample = {
+  progress: number
+  passedObjects: number
+  ppCurrent: number
+  ppIfFc: number
+  accuracy: number | null
+  combo: number
+  score: number
+  misses: number
+  sliderBreaks: number
+  hp: number | null
+}
 
 const PRIMARY_NAV = [
   { id: 'session', label: 'Session', icon: SessionIcon },
@@ -76,6 +112,10 @@ const isTauriRuntime = () =>
 const isOverlayRoute = () =>
   typeof window !== 'undefined' &&
   new URL(window.location.href).searchParams.get('overlay') === '1'
+
+const isOverlayEditorRoute = () =>
+  typeof window !== 'undefined' &&
+  new URL(window.location.href).searchParams.get('overlayEditor') === '1'
 
 const formatPp = (value: number) => `${value.toFixed(2)} PP`
 
@@ -99,6 +139,111 @@ const formatLength = (milliseconds: number) => {
   return `${minutes}:${String(remainder).padStart(2, '0')}`
 }
 
+const clampPercent = (value: number) => `${Math.max(0, Math.min(100, value)).toFixed(2)}%`
+
+const hotkeyFromKeyboardEvent = (event: KeyboardEvent | ReactKeyboardEvent<HTMLElement>) => {
+  if (event.key === 'Escape') {
+    return null
+  }
+
+  if (['Control', 'Shift', 'Alt', 'Meta'].includes(event.key)) {
+    return null
+  }
+
+  if (event.key === ' ') {
+    return 'Space'
+  }
+
+  if (event.key === 'PageUp') {
+    return 'PageUp'
+  }
+
+  if (event.key === 'PageDown') {
+    return 'PageDown'
+  }
+
+  if (event.key === 'ArrowLeft') {
+    return 'Left'
+  }
+
+  if (event.key === 'ArrowRight') {
+    return 'Right'
+  }
+
+  if (event.key === 'ArrowUp') {
+    return 'Up'
+  }
+
+  if (event.key === 'ArrowDown') {
+    return 'Down'
+  }
+
+  if (event.key.length === 1) {
+    return event.key.toUpperCase()
+  }
+
+  return event.key
+}
+
+const sampleSession: SessionSnapshot = {
+  phase: 'playing',
+  beatmap: {
+    artist: 'Camellia',
+    title: "Exit This Earth's Atomosphere",
+    difficultyName: 'Expert+',
+    creator: 'Realazy',
+    status: 'Ranked',
+    mode: 'osu!',
+    path: 'preview.osu',
+    coverPath: null,
+    lengthMs: 258000,
+    objectCount: 1428,
+    starRating: 6.82,
+    ar: 9.6,
+    od: 9.1,
+    cs: 4,
+    hp: 6.5,
+    bpm: 182,
+    mods: ['HD', 'HR'],
+  },
+  live: {
+    username: 'player',
+    gameState: 'Playing',
+    accuracy: 98.43,
+    combo: 891,
+    maxCombo: 1048,
+    score: 8445321,
+    misses: 1,
+    retries: 2,
+    hp: 0.72,
+    progress: 0.64,
+    passedObjects: 914,
+    modsText: 'HDHR',
+    hits: {
+      nGeki: 0,
+      nKatu: 0,
+      n300: 642,
+      n100: 18,
+      n50: 2,
+      misses: 1,
+      sliderBreaks: 1,
+    },
+  },
+  pp: {
+    current: 436.72,
+    ifFc: 512.44,
+    fullMap: 548.18,
+    calculator: 'rosu-pp 4.0.1',
+    difficultyAdjust: 1.08,
+    modsMultiplier: 1.12,
+    components: [
+      { label: 'Aim', value: 214.2 },
+      { label: 'Speed', value: 151.8 },
+      { label: 'Accuracy', value: 70.72 },
+    ],
+  },
+}
+
 const formatRelativeTime = (timestampMs: number) => {
   const diffMinutes = Math.max(0, Math.round((Date.now() - timestampMs) / 60000))
 
@@ -118,6 +263,59 @@ const formatRelativeTime = (timestampMs: number) => {
 
   const days = Math.floor(hours / 24)
   return `${days}d ago`
+}
+
+const accuracyTone = (accuracy: number | null) => {
+  if (accuracy === null) {
+    return 'neutral'
+  }
+
+  if (accuracy >= 98) {
+    return 'good'
+  }
+
+  if (accuracy >= 95) {
+    return 'warn'
+  }
+
+  return 'danger'
+}
+
+const visibleOverlayElements = (settings: OverlaySettings) => {
+  const elements: Array<{ id: string; visible: boolean; settings: OverlayElementSettings }> = [
+    { id: 'pp', visible: settings.showPp && settings.ppPanel.enabled, settings: settings.ppPanel },
+    {
+      id: 'stats',
+      visible:
+        settings.statsPanel.enabled &&
+        (settings.showIfFc || settings.showAccuracy || settings.showCombo || settings.showMods),
+      settings: settings.statsPanel,
+    },
+    { id: 'hits', visible: settings.showHits && settings.hitsPanel.enabled, settings: settings.hitsPanel },
+    { id: 'map', visible: settings.showMap && settings.mapPanel.enabled, settings: settings.mapPanel },
+  ]
+
+  return elements.filter((element) => element.visible)
+}
+
+const overlayPreviewBounds = (settings: OverlaySettings) => {
+  const elements = visibleOverlayElements(settings)
+
+  if (elements.length === 0) {
+    return { left: 0, top: 0, width: Math.max(settings.width, 1), height: Math.max(settings.height, 1) }
+  }
+
+  const left = Math.min(0, ...elements.map((element) => element.settings.x))
+  const top = Math.min(0, ...elements.map((element) => element.settings.y))
+  const right = Math.max(settings.width, ...elements.map((element) => element.settings.x + element.settings.width))
+  const bottom = Math.max(settings.height, ...elements.map((element) => element.settings.y + element.settings.height))
+
+  return {
+    left,
+    top,
+    width: Math.max(1, right - left),
+    height: Math.max(1, bottom - top),
+  }
 }
 
 const graphPath = (values: number[], width: number, height: number) => {
@@ -178,16 +376,19 @@ const startTauriWindowDrag = async (event: ReactPointerEvent<HTMLElement>) => {
 
 function App() {
   const overlayMode = isOverlayRoute()
+  const overlayEditorMode = isOverlayEditorRoute()
   const [snapshot, setSnapshot] = useState<AppSnapshot>(initialSnapshot)
   const [overlaySettings, setOverlaySettings] = useState<OverlaySettings>(DEFAULT_OVERLAY_SETTINGS)
   const [activeView, setActiveView] = useState<AppView>('session')
   const [mapGraph, setMapGraph] = useState<number[]>([])
+  const [mapTimeline, setMapTimeline] = useState<PerformanceSample[]>([])
   const [sessionGraph, setSessionGraph] = useState<number[]>([])
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
   const [isMaximized, setIsMaximized] = useState(false)
   const [coverImage, setCoverImage] = useState<{ path: string; src: string } | null>(null)
   const currentMapKeyRef = useRef<string | null>(null)
   const mapGraphRef = useRef<number[]>([])
+  const mapTimelineRef = useRef<PerformanceSample[]>([])
   const sessionGraphRef = useRef<number[]>([])
   const viewModel = useDeferredValue(snapshot)
 
@@ -197,18 +398,21 @@ function App() {
     if (!session || session.phase === 'preview') {
       currentMapKeyRef.current = null
       mapGraphRef.current = []
+      mapTimelineRef.current = []
       sessionGraphRef.current = []
       setMapGraph([])
+      setMapTimeline([])
       setSessionGraph([])
       setSnapshot(nextSnapshot)
       return
     }
 
     const mapKey = `${session.beatmap.path}:${session.live.modsText}`
+    const previousMapKey = currentMapKeyRef.current
     const currentPp = Number(session.pp.current.toFixed(2))
 
     const nextMapGraph = (() => {
-      const base = currentMapKeyRef.current === mapKey ? mapGraphRef.current : []
+      const base = previousMapKey === mapKey ? mapGraphRef.current : []
       const last = base.at(-1)
 
       currentMapKeyRef.current = mapKey
@@ -230,9 +434,41 @@ function App() {
       return [...sessionGraphRef.current, currentPp].slice(-MAX_GRAPH_POINTS)
     })()
 
+    const nextMapTimeline = (() => {
+      const base = previousMapKey === mapKey ? mapTimelineRef.current : []
+      const progress = session.phase === 'result' ? 1 : session.live.progress
+      const nextSample: PerformanceSample = {
+        progress,
+        passedObjects: session.live.passedObjects,
+        ppCurrent: session.pp.current,
+        ppIfFc: session.pp.ifFc,
+        accuracy: session.live.accuracy,
+        combo: session.live.combo,
+        score: session.live.score,
+        misses: session.live.hits.misses,
+        sliderBreaks: session.live.hits.sliderBreaks,
+        hp: session.live.hp,
+      }
+      const last = base.at(-1)
+
+      if (
+        last &&
+        last.passedObjects === nextSample.passedObjects &&
+        last.misses === nextSample.misses &&
+        last.sliderBreaks === nextSample.sliderBreaks &&
+        Math.abs(last.progress - nextSample.progress) < 0.001
+      ) {
+        return base
+      }
+
+      return [...base, nextSample].slice(-MAX_GRAPH_POINTS)
+    })()
+
     mapGraphRef.current = nextMapGraph
+    mapTimelineRef.current = nextMapTimeline
     sessionGraphRef.current = nextSessionGraph
     setMapGraph(nextMapGraph)
+    setMapTimeline(nextMapTimeline)
     setSessionGraph(nextSessionGraph)
     setSnapshot(nextSnapshot)
   })
@@ -240,12 +476,16 @@ function App() {
   useEffect(() => {
     document.body.dataset.overlayMode = overlayMode ? 'true' : 'false'
     document.documentElement.dataset.overlayMode = overlayMode ? 'true' : 'false'
+    document.body.dataset.overlayEditorMode = overlayEditorMode ? 'true' : 'false'
+    document.documentElement.dataset.overlayEditorMode = overlayEditorMode ? 'true' : 'false'
 
     return () => {
       delete document.body.dataset.overlayMode
       delete document.documentElement.dataset.overlayMode
+      delete document.body.dataset.overlayEditorMode
+      delete document.documentElement.dataset.overlayEditorMode
     }
-  }, [overlayMode])
+  }, [overlayEditorMode, overlayMode])
 
   useEffect(() => {
     const preventContextMenu = (event: globalThis.MouseEvent) => {
@@ -511,6 +751,17 @@ function App() {
     return <OverlayHudWindowPage session={session} settings={overlaySettings} />
   }
 
+  if (overlayEditorMode) {
+    return (
+      <OverlayEditorWindowPage
+        settings={overlaySettings}
+        onUpdateSettings={(nextSettings) => {
+          void persistOverlaySettings(nextSettings)
+        }}
+      />
+    )
+  }
+
   return (
     <div className="window-shell window-shell--intro">
       <header className="titlebar">
@@ -624,6 +875,7 @@ function App() {
               connection={viewModel.connection}
               coverSrc={coverSrc}
               mapGraph={mapGraph}
+              mapTimeline={mapTimeline}
               recentPlays={viewModel.recentPlays}
               session={session}
               sessionGraph={sessionGraph}
@@ -658,11 +910,11 @@ function App() {
       </div>
 
       <footer className="statusbar">
-        <span className={`statusbar__badge statusbar__badge--${viewModel.connection.status}`}>
+          <span className={`statusbar__badge statusbar__badge--${viewModel.connection.status}`}>
           {viewModel.connection.status}
         </span>
         <span>{session?.live.gameState ?? 'Idle'}</span>
-        <span>{viewModel.recentPlays.length} saved plays</span>
+        <span>{viewModel.recentPlays.length} / {RECENT_PLAY_LIMIT} saved plays</span>
         <span>{session?.pp.calculator ?? 'rosu-pp 4.0.1'}</span>
       </footer>
 
@@ -857,6 +1109,470 @@ function OverlayHudCard({
   )
 }
 
+function OverlayEditorWindowPage({
+  settings,
+  onUpdateSettings,
+}: {
+  settings: OverlaySettings
+  onUpdateSettings: (settings: OverlaySettings) => void
+}) {
+  const [draft, setDraft] = useState(settings)
+  const latestDraftRef = useRef(settings)
+  const [selectedElement, setSelectedElement] = useState<OverlayPanelKey>('ppPanel')
+  const dragRef = useRef<{
+    key: OverlayPanelKey
+    mode: 'move' | 'resize'
+    pointerX: number
+    pointerY: number
+    startX: number
+    startY: number
+    startWidth: number
+    startHeight: number
+  } | null>(null)
+
+  useEffect(() => {
+    if (dragRef.current) {
+      return
+    }
+
+    latestDraftRef.current = settings
+    setDraft(settings)
+  }, [settings])
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        void getCurrentWindow().close()
+      }
+
+      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+        onUpdateSettings(draft)
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [draft, onUpdateSettings])
+
+  const updateDraft = (nextSettings: OverlaySettings) => {
+    latestDraftRef.current = nextSettings
+    setDraft(nextSettings)
+  }
+
+  const commitDraft = (nextSettings: OverlaySettings) => {
+    latestDraftRef.current = nextSettings
+    setDraft(nextSettings)
+    onUpdateSettings(nextSettings)
+  }
+
+  const applyPreset = (preset: Pick<OverlaySettings, 'width' | 'height'> & Partial<OverlaySettings>) => {
+    const nextSettings = {
+      ...draft,
+      ...preset,
+    }
+    commitDraft(nextSettings)
+  }
+
+  const updateElementPosition = (
+    key: OverlayPanelKey,
+    x: number,
+    y: number,
+    commit = false,
+  ) => {
+    const currentDraft = latestDraftRef.current
+    const element = currentDraft[key]
+    const nextSettings = {
+      ...currentDraft,
+      [key]: {
+        ...element,
+        x: Math.round(x),
+        y: Math.round(y),
+      },
+    }
+
+    if (commit) {
+      commitDraft(nextSettings)
+      return
+    }
+
+    updateDraft(nextSettings)
+  }
+
+  const updateElementSize = (
+    key: OverlayPanelKey,
+    width: number,
+    height: number,
+  ) => {
+    const currentDraft = latestDraftRef.current
+    const element = currentDraft[key]
+    updateDraft({
+      ...currentDraft,
+      [key]: {
+        ...element,
+        width: Math.max(40, Math.round(width)),
+        height: Math.max(24, Math.round(height)),
+      },
+    })
+  }
+
+  const beginDrag = (
+    key: OverlayPanelKey,
+    event: ReactPointerEvent<HTMLElement>,
+    mode: 'move' | 'resize' = 'move',
+  ) => {
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setSelectedElement(key)
+    dragRef.current = {
+      key,
+      mode,
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      startX: draft[key].x,
+      startY: draft[key].y,
+      startWidth: draft[key].width,
+      startHeight: draft[key].height,
+    }
+  }
+
+  const handleDragMove = (event: ReactPointerEvent<HTMLElement>) => {
+    const drag = dragRef.current
+
+    if (!drag) {
+      return
+    }
+
+    const deltaX = event.clientX - drag.pointerX
+    const deltaY = event.clientY - drag.pointerY
+
+    if (drag.mode === 'resize') {
+      updateElementSize(drag.key, drag.startWidth + deltaX, drag.startHeight + deltaY)
+      return
+    }
+
+    updateElementPosition(drag.key, drag.startX + deltaX, drag.startY + deltaY)
+  }
+
+  const endDrag = () => {
+    dragRef.current = null
+    onUpdateSettings(latestDraftRef.current)
+  }
+
+  const isPanelVisible = (settingsValue: OverlaySettings, key: OverlayPanelKey) => {
+    if (key === 'ppPanel') {
+      return settingsValue.showPp && settingsValue.ppPanel.enabled
+    }
+
+    if (key === 'statsPanel') {
+      return (
+        settingsValue.statsPanel.enabled &&
+        (settingsValue.showIfFc || settingsValue.showAccuracy || settingsValue.showCombo || settingsValue.showMods)
+      )
+    }
+
+    if (key === 'hitsPanel') {
+      return settingsValue.showHits && settingsValue.hitsPanel.enabled
+    }
+
+    return settingsValue.showMap && settingsValue.mapPanel.enabled
+  }
+
+  const setPanelVisible = (key: OverlayPanelKey, visible: boolean) => {
+    const currentDraft = latestDraftRef.current
+    const nextSettings: OverlaySettings = { ...currentDraft, [key]: { ...currentDraft[key], enabled: visible } }
+
+    if (key === 'ppPanel') {
+      nextSettings.showPp = visible
+    } else if (key === 'statsPanel') {
+      if (visible && !nextSettings.showIfFc && !nextSettings.showAccuracy && !nextSettings.showCombo && !nextSettings.showMods) {
+        nextSettings.showIfFc = true
+        nextSettings.showAccuracy = true
+      }
+    } else if (key === 'hitsPanel') {
+      nextSettings.showHits = visible
+    } else {
+      nextSettings.showMap = visible
+    }
+
+    commitDraft(nextSettings)
+  }
+
+  const updatePanelSettings = (key: OverlayPanelKey, element: OverlayElementSettings) => {
+    const currentDraft = latestDraftRef.current
+    commitDraft({
+      ...currentDraft,
+      [key]: element,
+    })
+  }
+
+  const updateStatsMetric = (
+    key: 'showIfFc' | 'showAccuracy' | 'showCombo' | 'showMods',
+    value: boolean,
+  ) => {
+    const currentDraft = latestDraftRef.current
+    commitDraft({
+      ...currentDraft,
+      statsPanel: {
+        ...currentDraft.statsPanel,
+        enabled: true,
+      },
+      [key]: value,
+    })
+  }
+
+  const elementButtons: Array<{
+    key: OverlayPanelKey
+    label: string
+  }> = [
+    { key: 'ppPanel', label: 'PP' },
+    { key: 'statsPanel', label: 'Stats' },
+    { key: 'hitsPanel', label: 'Hits' },
+    { key: 'mapPanel', label: 'Map' },
+  ]
+  const selectedPanel = draft[selectedElement]
+  const selectedVisible = isPanelVisible(draft, selectedElement)
+
+  return (
+    <main className="overlay-editor-window">
+      <div className="overlay-editor-topbar">
+        <div>
+          <strong>Overlay Editor</strong>
+          <span>Drag panels over the game. Ctrl+Enter saves, Esc closes.</span>
+        </div>
+        <div className="overlay-editor-actions">
+          <button type="button" onClick={() => applyPreset({ width: 280, height: 62, showMap: false, ...compactOverlayPanels })}>
+            Compact
+          </button>
+          <button type="button" onClick={() => applyPreset({ width: 396, height: 106, showMap: true, ...tournamentOverlayPanels })}>
+            Tournament
+          </button>
+          <button type="button" onClick={() => applyPreset({ width: 266, height: 56, showMap: false, showBackground: false, ...minimalOverlayPanels })}>
+            Minimal
+          </button>
+          <button
+            className="overlay-editor-actions__primary"
+            type="button"
+            onClick={() => {
+              onUpdateSettings(draft)
+              void getCurrentWindow().close()
+            }}
+          >
+            Done
+          </button>
+        </div>
+      </div>
+
+      <section
+        className="overlay-editor-canvas"
+        onPointerMove={handleDragMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+      >
+        <EditableOverlayElement
+          active={selectedElement === 'ppPanel'}
+          elementKey="ppPanel"
+          label={`${sampleSession.pp.current.toFixed(2)} PP`}
+          settings={draft}
+          visible={isPanelVisible(draft, 'ppPanel')}
+          onPointerDown={beginDrag}
+        />
+        <EditableOverlayElement
+          active={selectedElement === 'statsPanel'}
+          elementKey="statsPanel"
+          label={`IF FC ${sampleSession.pp.ifFc.toFixed(0)} · ACC ${formatAccuracy(sampleSession.live.accuracy)} · ${sampleSession.live.combo}x · ${sampleSession.live.modsText}`}
+          settings={draft}
+          visible={isPanelVisible(draft, 'statsPanel')}
+          onPointerDown={beginDrag}
+        />
+        <EditableOverlayElement
+          active={selectedElement === 'hitsPanel'}
+          elementKey="hitsPanel"
+          label={`100 ${sampleSession.live.hits.n100}    50 ${sampleSession.live.hits.n50}    MISS ${sampleSession.live.hits.misses}    SB ${sampleSession.live.hits.sliderBreaks}`}
+          settings={draft}
+          visible={isPanelVisible(draft, 'hitsPanel')}
+          onPointerDown={beginDrag}
+        />
+        <EditableOverlayElement
+          active={selectedElement === 'mapPanel'}
+          elementKey="mapPanel"
+          label={`${sampleSession.beatmap.artist} - ${sampleSession.beatmap.title}`}
+          settings={draft}
+          visible={isPanelVisible(draft, 'mapPanel')}
+          onPointerDown={beginDrag}
+        />
+      </section>
+
+      <aside className="overlay-editor-side">
+        <div className="overlay-editor-tabs">
+          {elementButtons.map((item) => (
+            <button
+              className={[
+                'overlay-editor-tab',
+                selectedElement === item.key ? 'overlay-editor-tab--active' : '',
+                isPanelVisible(draft, item.key) ? '' : 'overlay-editor-tab--muted',
+              ]
+                .filter(Boolean)
+                .join(' ')}
+              key={item.key}
+              type="button"
+              onClick={() => setSelectedElement(item.key)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        <div className="overlay-editor-fields">
+          <label className="overlay-editor-check overlay-editor-check--wide">
+            <input
+              checked={selectedVisible}
+              type="checkbox"
+              onChange={(event) => setPanelVisible(selectedElement, event.target.checked)}
+            />
+            <span>Visible</span>
+          </label>
+          <label className="overlay-editor-check overlay-editor-check--wide">
+            <input
+              checked={selectedPanel.showBackground}
+              type="checkbox"
+              onChange={(event) =>
+                updatePanelSettings(selectedElement, {
+                  ...selectedPanel,
+                  showBackground: event.target.checked,
+                })
+              }
+            />
+            <span>Background</span>
+          </label>
+          <label>
+            <span>X</span>
+            <input
+              type="number"
+              value={selectedPanel.x}
+              onChange={(event) =>
+                updateElementPosition(selectedElement, Number(event.target.value), selectedPanel.y, true)
+              }
+            />
+          </label>
+          <label>
+            <span>Y</span>
+            <input
+              type="number"
+              value={selectedPanel.y}
+              onChange={(event) =>
+                updateElementPosition(selectedElement, selectedPanel.x, Number(event.target.value), true)
+              }
+            />
+          </label>
+          <label>
+            <span>Width</span>
+            <input
+              min={24}
+              type="number"
+              value={selectedPanel.width}
+              onChange={(event) =>
+                updatePanelSettings(selectedElement, {
+                  ...selectedPanel,
+                  width: Math.max(24, Number(event.target.value)),
+                })
+              }
+            />
+          </label>
+          <label>
+            <span>Height</span>
+            <input
+              min={16}
+              type="number"
+              value={selectedPanel.height}
+              onChange={(event) =>
+                updatePanelSettings(selectedElement, {
+                  ...selectedPanel,
+                  height: Math.max(16, Number(event.target.value)),
+                })
+              }
+            />
+          </label>
+          {selectedElement === 'statsPanel' ? (
+            <div className="overlay-editor-metric-grid">
+              {[
+                ['showIfFc', 'IF FC'],
+                ['showAccuracy', 'Acc'],
+                ['showCombo', 'Combo'],
+                ['showMods', 'Mods'],
+              ].map(([key, label]) => (
+                <label className="overlay-editor-check" key={key}>
+                  <input
+                    checked={Boolean(draft[key as 'showIfFc' | 'showAccuracy' | 'showCombo' | 'showMods'])}
+                    type="checkbox"
+                    onChange={(event) =>
+                      updateStatsMetric(key as 'showIfFc' | 'showAccuracy' | 'showCombo' | 'showMods', event.target.checked)
+                    }
+                  />
+                  <span>{label}</span>
+                </label>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </aside>
+    </main>
+  )
+}
+
+function EditableOverlayElement({
+  active,
+  elementKey,
+  label,
+  settings,
+  visible,
+  onPointerDown,
+}: {
+  active: boolean
+  elementKey: OverlayPanelKey
+  label: string
+  settings: OverlaySettings
+  visible: boolean
+  onPointerDown: (
+    key: OverlayPanelKey,
+    event: ReactPointerEvent<HTMLElement>,
+    mode?: 'move' | 'resize',
+  ) => void
+}) {
+  const element = settings[elementKey]
+
+  return (
+    <button
+      className={[
+        'overlay-editor-element',
+        active ? 'overlay-editor-element--active' : '',
+        visible ? '' : 'overlay-editor-element--hidden',
+      ]
+        .filter(Boolean)
+        .join(' ')}
+      style={{
+        left: `${element.x}px`,
+        top: `${element.y}px`,
+        width: `${element.width}px`,
+        height: `${element.height}px`,
+      }}
+      type="button"
+      onPointerDown={(event) => onPointerDown(elementKey, event)}
+    >
+      <span>{label}</span>
+      <i
+        aria-hidden="true"
+        className="overlay-editor-element__resize"
+        onPointerDown={(event) => {
+          event.stopPropagation()
+          onPointerDown(elementKey, event, 'resize')
+        }}
+      />
+    </button>
+  )
+}
+
 function AppIcon() {
   return <img alt="" src={appIconUrl} />
 }
@@ -865,6 +1581,7 @@ function SessionView({
   connection,
   coverSrc,
   mapGraph,
+  mapTimeline,
   recentPlays,
   session,
   sessionGraph,
@@ -873,6 +1590,7 @@ function SessionView({
   connection: AppSnapshot['connection']
   coverSrc: string | null
   mapGraph: number[]
+  mapTimeline: PerformanceSample[]
   recentPlays: RecentPlaySnapshot[]
   session: SessionSnapshot | null
   sessionGraph: number[]
@@ -897,7 +1615,7 @@ function SessionView({
             {session.phase === 'preview' ? (
               <PreviewMetricsCard session={session} />
             ) : (
-              <LivePlayCard graph={sessionGraph} session={session} />
+              <LivePlayCard graph={sessionGraph} session={session} timeline={mapTimeline} />
             )}
             <RecentPlaysCard recentPlays={recentPlays} onOpenHistory={onOpenHistory} />
           </section>
@@ -941,9 +1659,17 @@ function NowPlayingCard({
 }) {
   const { beatmap, live, phase } = session
   const currentTime = phase === 'preview' ? 0 : Math.round(beatmap.lengthMs * live.progress)
+  const cardStyle = coverSrc
+    ? ({
+        '--beatmap-cover': `url("${coverSrc}")`,
+      } as CSSProperties)
+    : undefined
 
   return (
-    <section className="panel">
+    <section
+      className={`panel now-playing-panel ${coverSrc ? 'now-playing-panel--with-cover' : ''}`}
+      style={cardStyle}
+    >
       <div className="panel__title">
         {phase === 'preview' ? 'Selected Beatmap' : 'Now Playing'}
       </div>
@@ -1057,9 +1783,11 @@ function PreviewMetricsCard({ session }: { session: SessionSnapshot }) {
 function LivePlayCard({
   graph,
   session,
+  timeline,
 }: {
   graph: number[]
   session: SessionSnapshot
+  timeline: PerformanceSample[]
 }) {
   const { beatmap, live, phase, pp } = session
   const comboTarget = beatmap.objectCount > 0 ? Math.max(live.maxCombo, live.combo) : live.maxCombo
@@ -1143,6 +1871,8 @@ function LivePlayCard({
         )}
       </div>
 
+      <PerformanceTimeline session={session} timeline={timeline} />
+
       <div className="stats-footer">
         <span>Play Length: {formatLength(beatmap.lengthMs)}</span>
         <span>CS: {beatmap.cs.toFixed(1)}</span>
@@ -1150,6 +1880,98 @@ function LivePlayCard({
         <span>OD: {beatmap.od.toFixed(1)}</span>
         <span>HP: {beatmap.hp.toFixed(1)}</span>
         <span>SR: {beatmap.starRating.toFixed(2)}★</span>
+      </div>
+    </section>
+  )
+}
+
+function PerformanceTimeline({
+  session,
+  timeline,
+}: {
+  session: SessionSnapshot
+  timeline: PerformanceSample[]
+}) {
+  const { beatmap, live, pp } = session
+  const samples =
+    timeline.length > 0
+      ? timeline
+      : [
+          {
+            progress: live.progress,
+            passedObjects: live.passedObjects,
+            ppCurrent: pp.current,
+            ppIfFc: pp.ifFc,
+            accuracy: live.accuracy,
+            combo: live.combo,
+            score: live.score,
+            misses: live.hits.misses,
+            sliderBreaks: live.hits.sliderBreaks,
+            hp: live.hp,
+          },
+        ]
+  const latest = samples.at(-1)
+  const peak = samples.reduce((best, sample) => (sample.ppCurrent > best.ppCurrent ? sample : best), samples[0])
+  const firstMiss = samples.find((sample, index) => index > 0 && sample.misses > samples[index - 1].misses)
+  const firstSliderBreak = samples.find(
+    (sample, index) => index > 0 && sample.sliderBreaks > samples[index - 1].sliderBreaks,
+  )
+  const accuracyDrop = samples.find((sample) => sample.accuracy !== null && sample.accuracy < 98)
+  const potentialLoss = Math.max(0, pp.ifFc - pp.current)
+  const timelineEvents = [
+    { label: 'Peak PP', sample: peak, tone: 'good' },
+    firstSliderBreak ? { label: 'Slider break', sample: firstSliderBreak, tone: 'warn' } : null,
+    firstMiss ? { label: 'Miss', sample: firstMiss, tone: 'danger' } : null,
+    accuracyDrop ? { label: 'Acc drop', sample: accuracyDrop, tone: 'blue' } : null,
+  ].filter(Boolean) as Array<{ label: string; sample: PerformanceSample; tone: string }>
+
+  return (
+    <section className="performance-timeline">
+      <div className="performance-timeline__head">
+        <div>
+          <strong>Performance Timeline</strong>
+          <span>{formatCount(latest?.passedObjects ?? 0)} / {formatCount(beatmap.objectCount)} objects</span>
+        </div>
+        <div className="performance-timeline__loss">
+          <span>FC gap</span>
+          <strong>{potentialLoss.toFixed(2)} PP</strong>
+        </div>
+      </div>
+
+      <div className="performance-track" aria-hidden="true">
+        <div className="performance-track__rail" />
+        <div
+          className="performance-track__fill"
+          style={{ width: clampPercent((latest?.progress ?? live.progress) * 100) }}
+        />
+        {timelineEvents.map((event) => (
+          <div
+            className={`performance-event performance-event--${event.tone}`}
+            key={`${event.label}-${event.sample.passedObjects}-${event.sample.ppCurrent}`}
+            style={{ left: clampPercent(event.sample.progress * 100) }}
+          >
+            <span>{event.label}</span>
+          </div>
+        ))}
+      </div>
+
+      <div className="performance-summary">
+        <div>
+          <span>Peak</span>
+          <strong>{peak.ppCurrent.toFixed(2)} PP</strong>
+        </div>
+        <div>
+          <span>Accuracy</span>
+          <strong>{formatAccuracy(latest?.accuracy ?? live.accuracy)}</strong>
+        </div>
+        <div>
+          <span>Combo</span>
+          <strong>{formatCount(latest?.combo ?? live.combo)}x</strong>
+        </div>
+        <div>
+          <span>Miss / SB</span>
+          <strong>{formatCount(latest?.misses ?? live.hits.misses)} / {formatCount(latest?.sliderBreaks ?? live.hits.sliderBreaks)}</strong>
+        </div>
       </div>
     </section>
   )
@@ -1287,11 +2109,66 @@ function LivePpPanel({
 }
 
 function RecentHistoryView({ recentPlays }: { recentPlays: RecentPlaySnapshot[] }) {
+  const [coverImages, setCoverImages] = useState<Record<string, string>>({})
+
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return
+    }
+
+    const paths = Array.from(
+      new Set(
+        recentPlays
+          .map((play) => play.coverPath)
+          .filter((path): path is string => Boolean(path && !Object.prototype.hasOwnProperty.call(coverImages, path))),
+      ),
+    )
+
+    if (paths.length === 0) {
+      return
+    }
+
+    let cancelled = false
+
+    void Promise.all(
+      paths.map(async (path) => {
+        try {
+          const src = await invoke<string>('load_image_data_uri', { path })
+          return [path, src] as const
+        } catch {
+          return [path, ''] as const
+        }
+      }),
+    ).then((loaded) => {
+      if (cancelled) {
+        return
+      }
+
+      setCoverImages((current) => {
+        const next = { ...current }
+        let changed = false
+
+        for (const [path, src] of loaded) {
+          next[path] = src
+          changed = true
+        }
+
+        return changed ? next : current
+      })
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [coverImages, recentPlays])
+
   return (
     <section className="page-shell page-shell--single">
       <header className="page-header">
         <h1>Recent Plays</h1>
       </header>
+
+      <RecentPlayCards coverImages={coverImages} recentPlays={recentPlays} />
 
       <section className="panel">
         <div className="panel__title">Saved History</div>
@@ -1304,6 +2181,62 @@ function RecentHistoryView({ recentPlays }: { recentPlays: RecentPlaySnapshot[] 
   )
 }
 
+function RecentPlayCards({
+  coverImages,
+  recentPlays,
+}: {
+  coverImages: Record<string, string>
+  recentPlays: RecentPlaySnapshot[]
+}) {
+  if (recentPlays.length === 0) {
+    return null
+  }
+
+  const bestPp = Math.max(...recentPlays.map((play) => play.pp), 1)
+
+  return (
+    <section className="recent-card-grid" aria-label="Recent play cards">
+      {recentPlays.map((play) => {
+        const tone = accuracyTone(play.accuracy)
+        const ppWidth = (play.pp / bestPp) * 100
+        const coverSrc = play.coverPath ? coverImages[play.coverPath] : null
+
+        return (
+          <article className="recent-play-card" key={`card-${play.timestampMs}-${play.title}-${play.pp}`}>
+            <div className={`recent-play-card__cover recent-play-card__cover--${tone}`}>
+              {coverSrc ? <img src={coverSrc} alt="" /> : null}
+            </div>
+            <div className="recent-play-card__body">
+              <div className="recent-play-card__meta">
+                <span>{formatRelativeTime(play.timestampMs)}</span>
+                <span>{play.modsText}</span>
+              </div>
+              <h2>{play.title}</h2>
+              <div className="recent-play-card__stats">
+                <div>
+                  <strong>{play.pp.toFixed(2)}</strong>
+                  <span>PP</span>
+                </div>
+                <div>
+                  <strong>{formatAccuracy(play.accuracy)}</strong>
+                  <span>Acc</span>
+                </div>
+                <div>
+                  <strong>{formatCount(play.combo)}x</strong>
+                  <span>Combo</span>
+                </div>
+              </div>
+              <div className="recent-play-card__bar">
+                <div style={{ width: clampPercent(ppWidth) }} />
+              </div>
+            </div>
+          </article>
+        )
+      })}
+    </section>
+  )
+}
+
 function OverlayView({
   settings,
   onUpdateSettings,
@@ -1311,6 +2244,62 @@ function OverlayView({
   settings: OverlaySettings
   onUpdateSettings: (settings: OverlaySettings) => void
 }) {
+  const [capturingHotkey, setCapturingHotkey] = useState(false)
+  const overlayPresets: Array<{
+    label: string
+    description: string
+    settings: Partial<OverlaySettings>
+  }> = [
+    {
+      label: 'Compact',
+      description: 'Small readable HUD for regular play.',
+      settings: {
+        width: 280,
+        height: 62,
+        scale: 1,
+        fontScale: 1,
+        padding: 0,
+        cornerRadius: 10,
+        opacity: 0.9,
+        showBackground: true,
+        showMap: false,
+        ...compactOverlayPanels,
+      },
+    },
+    {
+      label: 'Tournament',
+      description: 'Larger numbers for capture and streams.',
+      settings: {
+        width: 396,
+        height: 106,
+        scale: 1,
+        fontScale: 1,
+        padding: 0,
+        cornerRadius: 12,
+        opacity: 0.94,
+        showBackground: true,
+        showMap: true,
+        ...tournamentOverlayPanels,
+      },
+    },
+    {
+      label: 'Minimal',
+      description: 'Transparent stats with low screen weight.',
+      settings: {
+        width: 266,
+        height: 56,
+        scale: 1,
+        fontScale: 0.92,
+        padding: 0,
+        cornerRadius: 8,
+        opacity: 0.72,
+        showBackground: false,
+        showMap: false,
+        ...minimalOverlayPanels,
+      },
+    },
+  ]
+
   const updateSetting = <K extends keyof OverlaySettings>(key: K, value: OverlaySettings[K]) => {
     onUpdateSettings({
       ...settings,
@@ -1331,6 +2320,16 @@ function OverlayView({
     updateSetting(key, nextValue)
   }
 
+  const updateHotkey = (value: string | null) => {
+    if (!value) {
+      setCapturingHotkey(false)
+      return
+    }
+
+    updateSetting('toggleKey', value)
+    setCapturingHotkey(false)
+  }
+
   const resetOverlaySettings = () => {
     onUpdateSettings(DEFAULT_OVERLAY_SETTINGS)
   }
@@ -1341,82 +2340,235 @@ function OverlayView({
         <h1>Overlay</h1>
       </header>
 
-      <section className="overlay-settings-grid">
-        <article className="overlay-settings-card overlay-settings-card--primary">
-          <div className="overlay-settings-card__copy">
-            <span className="overlay-settings-card__eyebrow">Overlay status</span>
-            <strong>{settings.enabled ? 'Enabled' : 'Disabled'}</strong>
-            <p>Turns the in-game HUD on or off.</p>
+      <section className="overlay-workspace">
+        <div className="overlay-settings-grid">
+          <article className="overlay-settings-card overlay-settings-card--primary">
+            <div className="overlay-settings-card__copy">
+              <span className="overlay-settings-card__eyebrow">Overlay status</span>
+              <strong>{settings.enabled ? 'Enabled' : 'Disabled'}</strong>
+              <p>Turns the in-game HUD on or off.</p>
+            </div>
+            <button
+              className={`toggle-button ${settings.enabled ? 'toggle-button--active' : ''}`}
+              type="button"
+              onClick={() => updateSetting('enabled', !settings.enabled)}
+            >
+              {settings.enabled ? 'Enabled' : 'Disabled'}
+            </button>
+          </article>
+
+          <article className="overlay-settings-card overlay-settings-card--presets">
+            <div className="overlay-settings-card__copy">
+              <span className="overlay-settings-card__eyebrow">HUD presets</span>
+              <strong>Layout starting points</strong>
+            </div>
+            <div className="overlay-preset-list">
+              {overlayPresets.map((preset) => (
+                <button
+                  className="overlay-preset"
+                  key={preset.label}
+                  type="button"
+                  onClick={() =>
+                    onUpdateSettings({
+                      ...settings,
+                      ...preset.settings,
+                    })
+                  }
+                >
+                  <span>{preset.label}</span>
+                  <small>{preset.description}</small>
+                </button>
+              ))}
+            </div>
+          </article>
+
+          <article className="overlay-settings-card">
+            <div className="overlay-settings-card__copy">
+              <span className="overlay-settings-card__eyebrow">In-game settings panel</span>
+              <strong>Editor window size</strong>
+              <p>Controls the settings panel shown inside osu!.</p>
+            </div>
+            <div className="number-grid overlay-settings-card__fields">
+              <label className="number-field">
+                <span>Width</span>
+                <input
+                  max={1100}
+                  min={760}
+                  type="number"
+                  value={settings.editorPanelWidth}
+                  onChange={(event) => updateNumericSetting('editorPanelWidth', event.target.value)}
+                />
+              </label>
+              <label className="number-field">
+                <span>Height</span>
+                <input
+                  max={760}
+                  min={520}
+                  type="number"
+                  value={settings.editorPanelHeight}
+                  onChange={(event) => updateNumericSetting('editorPanelHeight', event.target.value)}
+                />
+              </label>
+            </div>
+          </article>
+
+          <article className="overlay-settings-card overlay-settings-card--hotkey">
+            <div className="overlay-settings-card__copy">
+              <span className="overlay-settings-card__eyebrow">Editor hotkey</span>
+              <strong>{settings.toggleKey}</strong>
+              <p>Opens the in-game overlay editor window.</p>
+            </div>
+            <button
+              className={`hotkey-capture-button ${capturingHotkey ? 'hotkey-capture-button--active' : ''}`}
+              type="button"
+              onBlur={() => setCapturingHotkey(false)}
+              onClick={() => setCapturingHotkey(true)}
+              onKeyDown={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                updateHotkey(hotkeyFromKeyboardEvent(event))
+              }}
+            >
+              {capturingHotkey ? 'Press key' : settings.toggleKey}
+            </button>
+          </article>
+
+          <article className="overlay-settings-card">
+            <div className="overlay-settings-card__copy">
+              <span className="overlay-settings-card__eyebrow">Overlay data</span>
+              <strong>Data update interval</strong>
+              <p>Controls how often the overlay reads and redraws live osu! data.</p>
+            </div>
+            <label className="number-field overlay-settings-card__single-field">
+              <span>Milliseconds</span>
+              <input
+                max={1000}
+                min={16}
+                type="number"
+                value={settings.dataUpdateIntervalMs}
+                onChange={(event) => updateNumericSetting('dataUpdateIntervalMs', event.target.value)}
+              />
+            </label>
+          </article>
+
+          <article className="overlay-settings-card overlay-settings-card--reset">
+            <div className="overlay-settings-card__copy">
+              <span className="overlay-settings-card__eyebrow">Defaults</span>
+              <strong>Reset overlay settings</strong>
+              <p>Restores the HUD, in-game editor and hotkey settings.</p>
+            </div>
+            <button className="reset-button" type="button" onClick={resetOverlaySettings}>
+              Reset
+            </button>
+          </article>
+        </div>
+
+        <aside className="overlay-preview-panel">
+          <div className="overlay-preview-panel__head">
+            <div>
+              <span>Preview</span>
+              <strong>{settings.width} x {settings.height}</strong>
+            </div>
+            <span>{Math.round(settings.opacity * 100)}%</span>
           </div>
-          <button
-            className={`toggle-button ${settings.enabled ? 'toggle-button--active' : ''}`}
-            type="button"
-            onClick={() => updateSetting('enabled', !settings.enabled)}
+          <div
+            className="overlay-preview-stage"
+            style={
+              {
+                '--overlay-width': `${settings.width}px`,
+                '--overlay-height': `${settings.height}px`,
+                '--overlay-scale': settings.scale.toString(),
+                '--overlay-font-scale': settings.fontScale.toString(),
+                '--overlay-padding': `${settings.padding}px`,
+                '--overlay-radius': `${settings.cornerRadius}px`,
+                '--overlay-opacity': settings.opacity.toString(),
+              } as CSSProperties
+            }
           >
-            {settings.enabled ? 'Enabled' : 'Disabled'}
-          </button>
-        </article>
-
-        <article className="overlay-settings-card">
-          <div className="overlay-settings-card__copy">
-            <span className="overlay-settings-card__eyebrow">In-game settings panel</span>
-            <strong>Editor window size</strong>
-            <p>Controls the settings panel shown inside osu!.</p>
+            <NativeOverlayPreview session={sampleSession} settings={settings} />
           </div>
-          <div className="number-grid overlay-settings-card__fields">
-            <label className="number-field">
-              <span>Width</span>
-              <input
-                max={1100}
-                min={760}
-                type="number"
-                value={settings.editorPanelWidth}
-                onChange={(event) => updateNumericSetting('editorPanelWidth', event.target.value)}
-              />
-            </label>
-            <label className="number-field">
-              <span>Height</span>
-              <input
-                max={760}
-                min={520}
-                type="number"
-                value={settings.editorPanelHeight}
-                onChange={(event) => updateNumericSetting('editorPanelHeight', event.target.value)}
-              />
-            </label>
-          </div>
-        </article>
-
-        <article className="overlay-settings-card">
-          <div className="overlay-settings-card__copy">
-            <span className="overlay-settings-card__eyebrow">Overlay data</span>
-            <strong>Data update interval</strong>
-            <p>Controls how often the overlay reads and redraws live osu! data.</p>
-          </div>
-          <label className="number-field overlay-settings-card__single-field">
-            <span>Milliseconds</span>
-            <input
-              max={1000}
-              min={16}
-              type="number"
-              value={settings.dataUpdateIntervalMs}
-              onChange={(event) => updateNumericSetting('dataUpdateIntervalMs', event.target.value)}
-            />
-          </label>
-        </article>
-
-        <article className="overlay-settings-card overlay-settings-card--reset">
-          <div className="overlay-settings-card__copy">
-            <span className="overlay-settings-card__eyebrow">Defaults</span>
-            <strong>Reset overlay settings</strong>
-            <p>Restores the HUD, in-game editor and hotkey settings.</p>
-          </div>
-          <button className="reset-button" type="button" onClick={resetOverlaySettings}>
-            Reset
-          </button>
-        </article>
+        </aside>
       </section>
     </section>
+  )
+}
+
+function NativeOverlayPreview({
+  session,
+  settings,
+}: {
+  session: SessionSnapshot
+  settings: OverlaySettings
+}) {
+  const bounds = overlayPreviewBounds(settings)
+  const metricCells = [
+    settings.showIfFc ? ['IF FC', session.pp.ifFc.toFixed(2)] : null,
+    settings.showAccuracy ? ['ACC', formatAccuracy(session.live.accuracy)] : null,
+    settings.showCombo ? ['COMBO', `${session.live.combo}x`] : null,
+    settings.showMods ? ['MODS', session.live.modsText] : null,
+  ].filter(Boolean) as Array<[string, string]>
+  const hitCells = [
+    ['100', formatCount(session.live.hits.n100), 'blue'],
+    ['50', formatCount(session.live.hits.n50), 'orange'],
+    ['MISS', formatCount(session.live.hits.misses), 'red'],
+    ['SB', formatCount(session.live.hits.sliderBreaks), 'amber'],
+  ] as const
+
+  const elementStyle = (element: OverlayElementSettings) =>
+    ({
+      left: `${element.x - bounds.left}px`,
+      top: `${element.y - bounds.top}px`,
+      width: `${element.width}px`,
+      height: `${element.height}px`,
+    }) as CSSProperties
+
+  return (
+    <div
+      className="native-overlay-preview"
+      style={
+        {
+          width: `${bounds.width}px`,
+          height: `${bounds.height}px`,
+          '--overlay-opacity': settings.opacity.toString(),
+          '--overlay-radius': `${settings.cornerRadius}px`,
+        } as CSSProperties
+      }
+    >
+      {settings.showPp && settings.ppPanel.enabled ? (
+        <div className="native-overlay-panel native-overlay-panel--pp" style={elementStyle(settings.ppPanel)}>
+          <strong>{session.pp.current.toFixed(2)}</strong>
+          <span>PP</span>
+        </div>
+      ) : null}
+
+      {settings.statsPanel.enabled && metricCells.length > 0 ? (
+        <div className="native-overlay-panel native-overlay-panel--stats" style={elementStyle(settings.statsPanel)}>
+          {metricCells.map(([label, value]) => (
+            <div className="native-overlay-cell" key={label}>
+              <span>{label}</span>
+              <strong>{value}</strong>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {settings.showHits && settings.hitsPanel.enabled ? (
+        <div className="native-overlay-panel native-overlay-panel--hits" style={elementStyle(settings.hitsPanel)}>
+          {hitCells.map(([label, value, tone]) => (
+            <div className={`native-overlay-hit native-overlay-hit--${tone}`} key={label}>
+              <span>{label}</span>
+              <strong>{value}</strong>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {settings.showMap && settings.mapPanel.enabled ? (
+        <div className="native-overlay-panel native-overlay-panel--map" style={elementStyle(settings.mapPanel)}>
+          {session.beatmap.artist} - {session.beatmap.title} [{session.beatmap.difficultyName}]
+        </div>
+      ) : null}
+    </div>
   )
 }
 
@@ -1452,7 +2604,7 @@ function SettingsView({
           <div>
             <strong>Saved history</strong>
           </div>
-          <span className="settings-value">{recentPlayCount} / 5</span>
+          <span className="settings-value">{recentPlayCount} / {RECENT_PLAY_LIMIT}</span>
         </div>
       </section>
     </section>

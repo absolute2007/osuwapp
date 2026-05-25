@@ -92,32 +92,42 @@ impl Default for OverlaySettings {
             show_accuracy: true,
             show_combo: true,
             show_mods: true,
-            show_map: true,
+            show_map: false,
             show_hits: true,
-            width: 420,
-            height: 248,
+            width: 280,
+            height: 62,
             offset_x: 24,
             offset_y: 24,
-            scale: 0.82,
-            font_scale: 0.9,
-            padding: 8,
-            corner_radius: 12,
-            opacity: 0.92,
+            scale: 1.0,
+            font_scale: 1.0,
+            padding: 0,
+            corner_radius: 10,
+            opacity: 0.9,
             show_background: true,
             toggle_key: "Insert".to_string(),
             editor_panel_width: 760,
             editor_panel_height: 520,
             data_update_interval_ms: 90,
-            pp_panel: OverlayElementSettings::new(0, 0, 220, 40),
-            stats_panel: OverlayElementSettings::new(0, 42, 220, 34),
-            hits_panel: OverlayElementSettings::new(0, 78, 220, 22),
-            map_panel: OverlayElementSettings::new(0, 104, 360, 24),
+            pp_panel: OverlayElementSettings::new(0, 0, 106, 34),
+            stats_panel: OverlayElementSettings::new(112, 0, 168, 34),
+            hits_panel: OverlayElementSettings::new(0, 38, 280, 24),
+            map_panel: OverlayElementSettings {
+                enabled: false,
+                show_background: true,
+                x: 0,
+                y: 66,
+                width: 360,
+                height: 24,
+                scale: 1.0,
+                font_scale: 1.0,
+            },
         }
     }
 }
 
 impl OverlaySettings {
     pub fn normalized(mut self) -> Self {
+        self = self.migrated_from_legacy_layout();
         self.width = self.width.max(1);
         self.height = self.height.max(1);
         self.offset_x = self.offset_x.clamp(-3000, 3000);
@@ -136,6 +146,29 @@ impl OverlaySettings {
         self.hits_panel = self.hits_panel.normalized();
         self.map_panel = self.map_panel.normalized();
         self
+    }
+
+    fn migrated_from_legacy_layout(self) -> Self {
+        let uses_legacy_panels = self.pp_panel.x == 0
+            && self.pp_panel.y == 0
+            && self.pp_panel.width == 220
+            && self.pp_panel.height == 40
+            && self.stats_panel.x == 0
+            && self.stats_panel.y == 42
+            && self.hits_panel.x == 0
+            && self.hits_panel.y == 78
+            && self.map_panel.x == 0
+            && self.map_panel.y == 104;
+        let uses_preview_only_container = matches!(
+            (self.width, self.height),
+            (420, 248) | (360, 188) | (380, 172) | (520, 260)
+        );
+
+        if uses_legacy_panels && uses_preview_only_container {
+            Self::default()
+        } else {
+            self
+        }
     }
 }
 
@@ -258,6 +291,10 @@ pub struct PpComponentSnapshot {
 pub struct RecentPlaySnapshot {
     pub timestamp_ms: u64,
     pub title: String,
+    #[serde(default)]
+    pub beatmap_path: Option<String>,
+    #[serde(default)]
+    pub cover_path: Option<String>,
     pub mods_text: String,
     pub accuracy: f64,
     pub combo: u32,
