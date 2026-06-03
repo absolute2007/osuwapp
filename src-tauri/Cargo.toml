@@ -1,6 +1,6 @@
 [package]
 name = "osuwapp"
-version = "0.1.5"
+version = "0.1.6"
 description = "Desktop osu! session companion with live PP"
 authors = ["dundut"]
 license = "MIT"
