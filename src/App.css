@@ -141,8 +141,10 @@
   background: transparent;
   color: #4d5562;
   transition:
-    background-color 140ms ease,
-    color 140ms ease;
+    background-color 240ms ease,
+    color 220ms ease,
+    transform 300ms cubic-bezier(0.18, 1.22, 0.22, 1),
+    box-shadow 240ms ease;
 }
 
 .window-button svg {
@@ -403,10 +405,14 @@
 }
 
 .link-button {
-  border: 0;
-  background: transparent;
-  color: #2568dd;
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(120, 168, 255, 0.22);
+  border-radius: 999px;
+  background: rgba(120, 168, 255, 0.08);
+  color: #d7e5ff;
   font-size: 0.9rem;
+  font-weight: 650;
 }
 
 .now-playing {
@@ -731,7 +737,7 @@
 
 .performance-event {
   position: absolute;
-  top: 22px;
+  top: 16px;
   transform: translateX(-50%);
   display: grid;
   justify-items: center;
@@ -752,7 +758,7 @@
 }
 
 .performance-event span {
-  transform: translateY(-44px);
+  display: none;
 }
 
 .performance-event--good::before {
@@ -854,14 +860,36 @@
 
 .recent-play-card {
   min-width: 0;
+  width: 100%;
   overflow: hidden;
   border: 1px solid rgba(223, 219, 211, 0.92);
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.96);
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
+}
+
+.recent-play-card:hover,
+.recent-play-card:focus-visible {
+  border-color: rgba(37, 104, 221, 0.45);
+  box-shadow: 0 10px 24px rgba(29, 44, 69, 0.1);
+}
+
+.recent-play-card:focus-visible {
+  outline: 2px solid rgba(37, 104, 221, 0.42);
+  outline-offset: 2px;
+}
+
+.recent-play-card--selected {
+  border-color: rgba(37, 104, 221, 0.72);
+  box-shadow: 0 0 0 1px rgba(37, 104, 221, 0.18);
 }
 
 .recent-play-card__cover {
-  height: 72px;
+  aspect-ratio: 2.65 / 1;
+  min-height: 96px;
   position: relative;
   overflow: hidden;
   background:
@@ -881,6 +909,7 @@
   height: 100%;
   display: block;
   object-fit: cover;
+  object-position: center;
 }
 
 .recent-play-card__cover--good {
@@ -965,10 +994,100 @@
   background: #2568dd;
 }
 
+.recent-expand-button {
+  justify-self: start;
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid rgba(218, 214, 207, 0.96);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #344054;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.recent-expand-button:hover,
+.recent-expand-button:focus-visible {
+  border-color: rgba(37, 104, 221, 0.42);
+  color: #2568dd;
+}
+
+.recent-expand-button:focus-visible {
+  outline: 2px solid rgba(37, 104, 221, 0.3);
+  outline-offset: 2px;
+}
+
+.recent-play-details {
+  display: grid;
+  gap: 16px;
+}
+
+.recent-play-details__eyebrow {
+  display: block;
+  margin-bottom: 5px;
+  color: #7d8694;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.recent-play-details h2 {
+  margin: 0;
+  color: #2f3641;
+  font-size: 1.08rem;
+  line-height: 1.28;
+}
+
+.recent-play-details__grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.recent-play-details__grid div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid rgba(232, 228, 220, 0.94);
+  border-radius: 8px;
+  background: rgba(249, 248, 245, 0.86);
+}
+
+.recent-play-details__grid span,
+.recent-play-details__path {
+  color: #7d8694;
+  font-size: 0.78rem;
+}
+
+.recent-play-details__grid strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #303743;
+  font-size: 0.98rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-play-details__path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .pp-panel {
   min-height: 100%;
   padding-left: 22px;
   border-left: 1px solid rgba(228, 224, 216, 0.92);
+}
+
+.pp-panel {
+  padding-left: 28px;
+}
+
+.pp-panel__section {
+  padding: 18px 0 24px;
 }
 
 .pp-panel__section {
@@ -1194,6 +1313,11 @@
   border-radius: 999px;
   background: #fff;
   color: #2e3540;
+  transition:
+    border-color 240ms ease,
+    background 240ms ease,
+    box-shadow 240ms ease,
+    color 200ms ease;
 }
 
 .toggle-button:hover {
@@ -1257,6 +1381,12 @@
   border-radius: 10px;
   background: #fff;
   color: #404854;
+  transition:
+    border-color 260ms ease,
+    background 260ms ease,
+    box-shadow 260ms ease,
+    color 220ms ease,
+    transform 320ms cubic-bezier(0.18, 1.28, 0.22, 1);
 }
 
 .metric-toggle--active {
@@ -1359,6 +1489,11 @@
   color: #f0f3f8;
   font-weight: 750;
   text-align: left;
+  transition:
+    border-color 260ms ease,
+    background 260ms ease,
+    box-shadow 260ms ease,
+    color 220ms ease;
 }
 
 .hotkey-capture-button:hover,
@@ -1492,10 +1627,13 @@
 .native-overlay-panel--pp::after {
   content: '';
   position: absolute;
-  inset: 2px 2px auto 6px;
-  height: 50%;
+  inset: 2px 2px 2px 6px;
   border-radius: 7px;
-  background: rgba(255, 255, 255, calc(0.07 * var(--overlay-opacity, 0.9)));
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, calc(0.08 * var(--overlay-opacity, 0.9))),
+    rgba(255, 255, 255, calc(0.03 * var(--overlay-opacity, 0.9)))
+  );
 }
 
 .native-overlay-panel--pp strong {
@@ -1563,6 +1701,17 @@
   background: transparent;
   border: 0;
   box-shadow: none;
+}
+
+.pp-stats span,
+.pp-stats strong {
+  min-width: 0;
+}
+
+.pp-stats span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .native-overlay-hit {
@@ -1643,6 +1792,11 @@
   background: rgba(138, 44, 56, 0.16);
   color: #ffb8c0;
   font-weight: 650;
+  transition:
+    border-color 260ms ease,
+    background 260ms ease,
+    box-shadow 260ms ease,
+    color 220ms ease;
 }
 
 .reset-button:hover {
@@ -1746,17 +1900,25 @@
   border-radius: 8px;
   background: rgba(31, 37, 49, 0.94);
   color: #dfe8f7;
+  transition:
+    border-color 240ms ease,
+    background 240ms ease,
+    box-shadow 240ms ease,
+    color 200ms ease;
 }
 
 .overlay-editor-actions button:hover,
 .overlay-editor-tab:hover {
-  border-color: rgba(110, 162, 255, 0.42);
-  background: rgba(54, 76, 116, 0.94);
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
 
 .overlay-editor-actions__primary {
-  border-color: rgba(110, 162, 255, 0.54) !important;
-  background: rgba(56, 102, 184, 0.96) !important;
+  border-color: rgba(255, 94, 170, 0.34) !important;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.12), rgba(255, 94, 170, 0.16)),
+    rgba(255, 94, 170, 0.1) !important;
 }
 
 .overlay-editor-canvas {
@@ -2495,6 +2657,11 @@
 
 .sidebar__item {
   color: #b9c2cf;
+  transition:
+    background 260ms ease,
+    color 220ms ease,
+    transform 300ms cubic-bezier(0.18, 1.2, 0.22, 1),
+    box-shadow 260ms ease;
 }
 
 .sidebar__item:hover {
@@ -2689,6 +2856,1003 @@
     opacity 160ms ease;
 }
 
+/* Liquid glass application theme */
+.window-shell {
+  --glass-surface: rgba(32, 36, 47, 0.58);
+  --glass-surface-strong: rgba(44, 49, 63, 0.68);
+  --glass-tint: linear-gradient(145deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.038) 42%, rgba(0, 0, 0, 0.12));
+  --glass-refraction: radial-gradient(circle at 28% 8%, rgba(255, 255, 255, 0.1), rgba(120, 168, 255, 0.045) 28%, rgba(255, 94, 170, 0.032) 42%, transparent 66%);
+  --glass-highlight: linear-gradient(118deg, transparent 0 18%, rgba(255, 255, 255, 0.16) 34%, rgba(255, 255, 255, 0.035) 45%, transparent 58%);
+  --glass-bg: var(--glass-refraction), var(--glass-tint), linear-gradient(160deg, rgba(58, 63, 76, 0.7), rgba(25, 28, 37, 0.62));
+  --glass-bg-strong: var(--glass-refraction), linear-gradient(160deg, rgba(71, 78, 94, 0.78), rgba(30, 34, 45, 0.72));
+  --glass-border: rgba(255, 255, 255, 0.17);
+  --glass-border-strong: rgba(255, 255, 255, 0.3);
+  --glass-shadow: 0 22px 58px rgba(0, 0, 0, 0.32), 0 0 0 1px rgba(255, 255, 255, 0.035);
+  --glass-inner: inset 0 1px 0 rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(0, 0, 0, 0.3), inset 0 0 28px rgba(255, 255, 255, 0.035);
+  --glass-radius: 22px;
+  --glass-radius-compact: 16px;
+  --glass-ease-jelly: cubic-bezier(0.18, 1.18, 0.22, 1);
+  --glass-text: #f4f7fb;
+  --glass-muted: #aab2c0;
+  --glass-subtle: #7f8898;
+  --glass-accent: #ff5eaa;
+  --glass-accent-2: #78a8ff;
+  --glass-track: rgba(255, 255, 255, 0.1);
+  background:
+    radial-gradient(circle at 18% 0%, rgba(255, 255, 255, 0.08), transparent 28%),
+    linear-gradient(135deg, rgba(255, 94, 170, 0.09), transparent 32%),
+    linear-gradient(215deg, rgba(120, 168, 255, 0.1), transparent 38%),
+    #1d2028;
+  color: var(--glass-text);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.titlebar,
+.statusbar {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.014)),
+    rgba(24, 27, 35, 0.78);
+  border-color: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(18px) saturate(1.28);
+}
+
+.titlebar__brand-copy strong,
+.page-header h1,
+.panel__title,
+.now-playing__meta h2,
+.recent-play-card h2,
+.recent-play-details h2,
+.pp-panel__title,
+.pp-panel__subtitle,
+.overlay-settings-card__copy strong,
+.settings-row strong,
+.metric-block__value,
+.live-secondary strong,
+.recent-play-card__stats strong,
+.recent-play-details__grid strong,
+.pp-stats strong {
+  color: var(--glass-text);
+}
+
+.titlebar__brand-copy span,
+.titlebar__view,
+.page-header p,
+.panel__subtitle,
+.now-playing__creator,
+.recent-play-card__meta,
+.recent-play-card__stats span,
+.recent-play-details__eyebrow,
+.recent-play-details__grid span,
+.recent-play-details__path,
+.plays-table__head,
+.settings-value,
+.stats-footer,
+.preview-note,
+.pp-stats div,
+.overlay-settings-card__copy p,
+.overlay-settings-card__eyebrow,
+.number-field span {
+  color: var(--glass-muted);
+}
+
+.workspace-shell {
+  background: transparent;
+}
+
+.workspace-main {
+  position: relative;
+  overflow: hidden auto;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 18%),
+    rgba(18, 20, 27, 0.54);
+}
+
+.workspace-main__view {
+  min-height: 100%;
+  animation: liquid-view-in 280ms cubic-bezier(0.2, 0.82, 0.2, 1) both;
+}
+
+.sidebar {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.018)),
+    rgba(21, 24, 31, 0.76);
+  border-color: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(20px) saturate(1.25);
+}
+
+.sidebar__status-card {
+  margin-top: 14px;
+  padding: 14px 12px;
+  border: 1px solid var(--glass-border);
+  border-radius: 16px;
+  background: var(--glass-bg);
+  box-shadow: var(--glass-inner);
+  color: var(--glass-muted);
+}
+
+.sidebar__status-title {
+  color: var(--glass-text);
+}
+
+.sidebar__status-subtitle {
+  color: var(--glass-muted);
+}
+
+.liquid-segmented {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  padding: 4px;
+  border: 1px solid var(--glass-border);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 24% 0%, rgba(255, 255, 255, 0.16), transparent 34%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.028) 58%, rgba(0, 0, 0, 0.12)),
+    rgba(8, 10, 15, 0.24);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.26),
+    0 12px 28px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(22px) saturate(1.42);
+  touch-action: none;
+}
+
+.liquid-segmented::before {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  z-index: 0;
+  border-radius: inherit;
+  background:
+    linear-gradient(115deg, transparent 0 20%, rgba(255, 255, 255, 0.08) 34%, transparent 50%),
+    linear-gradient(290deg, transparent 0 46%, rgba(120, 168, 255, 0.055) 62%, transparent 78%);
+  opacity: 0.74;
+  pointer-events: none;
+}
+
+.liquid-segmented--vertical {
+  display: grid;
+  gap: 4px;
+}
+
+.liquid-segmented--horizontal {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: 4px;
+}
+
+.liquid-segmented__indicator {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 1;
+  border: 1px solid rgba(255, 255, 255, 0.44);
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at 30% 18%, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0.3) 28%, transparent 48%),
+    radial-gradient(circle at 72% 82%, rgba(120, 168, 255, 0.22), transparent 44%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0.15) 42%, rgba(255, 94, 170, 0.28) 76%, rgba(120, 168, 255, 0.2)),
+    rgba(255, 255, 255, 0.18);
+  box-shadow:
+    0 12px 26px rgba(0, 0, 0, 0.34),
+    0 0 0 1px rgba(255, 255, 255, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.66),
+    inset 0 -10px 20px rgba(0, 0, 0, 0.16),
+    inset 0 -14px 28px rgba(255, 94, 170, 0.16);
+  opacity: 0;
+  pointer-events: none;
+  backdrop-filter: blur(18px) saturate(1.55);
+  transition:
+    transform 380ms var(--glass-ease-jelly),
+    width 380ms var(--glass-ease-jelly),
+    height 380ms var(--glass-ease-jelly),
+    opacity 160ms ease,
+    box-shadow 220ms ease,
+    filter 220ms ease;
+}
+
+.liquid-segmented--dragging .liquid-segmented__indicator {
+  filter: brightness(1.1) saturate(1.18);
+  box-shadow:
+    0 24px 42px rgba(0, 0, 0, 0.42),
+    0 0 30px rgba(255, 94, 170, 0.16),
+    0 0 0 1px rgba(255, 255, 255, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.62),
+    inset 0 -8px 18px rgba(255, 94, 170, 0.1);
+  transition:
+    transform 38ms linear,
+    width 180ms var(--glass-ease-jelly),
+    height 180ms var(--glass-ease-jelly),
+    opacity 120ms ease,
+    box-shadow 140ms ease,
+    filter 140ms ease;
+}
+
+.sidebar__item,
+.overlay-editor-tab {
+  position: relative;
+  z-index: 2;
+  background: transparent;
+  border-color: transparent;
+  color: var(--glass-muted);
+  transition:
+    color 210ms ease,
+    transform 210ms ease,
+    text-shadow 210ms ease;
+}
+
+.sidebar__item:hover,
+.sidebar__item--active,
+.overlay-editor-tab:hover,
+.overlay-editor-tab--active {
+  background: transparent;
+  color: var(--glass-text);
+}
+
+.sidebar__nav {
+  margin-bottom: 14px;
+}
+
+.sidebar__item--separated-before {
+  margin-top: 16px;
+}
+
+.sidebar__item--separated-before::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: -10px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.22), transparent);
+  pointer-events: none;
+}
+
+.sidebar__item--active::before {
+  display: none;
+}
+
+.panel,
+.recent-play-card,
+.recent-play-details,
+.overlay-settings-card,
+.overlay-preview-panel,
+.settings-row,
+.overlay-editor-topbar,
+.overlay-editor-side {
+  position: relative;
+  border: 1px solid var(--glass-border);
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 18% 0%, rgba(255, 255, 255, 0.12), transparent 34%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.08), transparent 38%),
+    var(--glass-bg);
+  box-shadow:
+    var(--glass-shadow),
+    var(--glass-inner);
+  backdrop-filter: blur(24px) saturate(1.38);
+}
+
+.chart-panel,
+.performance-summary div,
+.live-secondary div,
+.metric-block,
+.pp-stats div,
+.recent-play-details__grid div {
+  position: relative;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.025)),
+    rgba(20, 24, 33, 0.78);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 6px 16px rgba(0, 0, 0, 0.14);
+  backdrop-filter: none;
+}
+
+.panel,
+.recent-play-card,
+.recent-play-details,
+.overlay-settings-card,
+.overlay-preview-panel {
+  border-radius: var(--glass-radius);
+}
+
+.panel::before,
+.recent-play-card::before,
+.overlay-settings-card::before,
+.overlay-preview-panel::before,
+.metric-block::before,
+.live-secondary div::before,
+.pp-stats div::before {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  z-index: 0;
+  border-radius: inherit;
+  background:
+    var(--glass-highlight),
+    radial-gradient(circle at 84% 12%, rgba(120, 168, 255, 0.08), transparent 36%),
+    radial-gradient(circle at 12% 92%, rgba(255, 94, 170, 0.06), transparent 38%);
+  background-size: 180% 180%, auto, auto;
+  opacity: 0.78;
+  pointer-events: none;
+  animation: none;
+}
+
+.recent-play-card::before,
+.metric-block::before,
+.live-secondary div::before,
+.pp-stats div::before,
+.performance-summary div::before,
+.recent-play-details__grid div::before {
+  display: none;
+}
+
+.panel::after,
+.recent-play-card::after,
+.overlay-settings-card::after,
+.overlay-preview-panel::after,
+.metric-block::after,
+.live-secondary div::after,
+.pp-stats div::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  background:
+    radial-gradient(circle at 24% 0%, rgba(255, 255, 255, 0.1), transparent 32%),
+    linear-gradient(125deg, transparent 12%, rgba(255, 255, 255, 0.085) 28%, transparent 45%);
+  mix-blend-mode: screen;
+  opacity: 0.42;
+  pointer-events: none;
+  transition: opacity 280ms ease;
+}
+
+.recent-play-card::after,
+.metric-block::after,
+.live-secondary div::after,
+.pp-stats div::after,
+.performance-summary div::after,
+.recent-play-details__grid div::after {
+  display: none;
+}
+
+.panel:hover::after,
+.overlay-settings-card:hover::after,
+.overlay-preview-panel:hover::after {
+  opacity: 0.62;
+}
+
+.panel > *,
+.recent-play-card > *,
+.overlay-settings-card > *,
+.overlay-preview-panel > *,
+.metric-block > *,
+.live-secondary div > *,
+.pp-stats div > * {
+  position: relative;
+  z-index: 1;
+}
+
+.now-playing-panel--with-cover {
+  background:
+    radial-gradient(circle at 24% 0%, rgba(255, 255, 255, 0.1), transparent 32%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.08), transparent 34%),
+    linear-gradient(90deg, rgba(19, 22, 30, 0.58), rgba(19, 22, 30, 0.82)),
+    var(--beatmap-cover) center / cover;
+  background-blend-mode: screen, normal, normal, soft-light;
+}
+
+.panel__title,
+.chart-panel__head,
+.stats-footer,
+.plays-table__head,
+.plays-table__row,
+.pp-panel,
+.pp-panel__section {
+  border-color: rgba(255, 255, 255, 0.09);
+}
+
+.plays-table__row {
+  color: #d6dce7;
+}
+
+.plays-table__empty {
+  color: var(--glass-muted);
+}
+
+.recent-play-card:hover,
+.recent-play-card:focus-visible,
+.recent-play-card--selected {
+  border-color: var(--glass-border);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.13),
+    0 8px 20px rgba(0, 0, 0, 0.16);
+}
+
+.recent-play-card__body,
+.recent-play-details__grid div,
+.performance-summary div {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.metric-block,
+.live-secondary div,
+.performance-summary div,
+.recent-play-details__grid div,
+.pp-stats div,
+.breakdown-item,
+.map-graph,
+.chart-panel,
+.cover-art,
+.mod-chip,
+.plays-table__head,
+.plays-table__row,
+.stats-footer,
+.number-field input,
+.overlay-editor-fields input {
+  border-radius: var(--glass-radius-compact);
+  overflow: hidden;
+}
+
+.metric-block {
+  min-height: 116px;
+  padding: 18px 18px 16px;
+}
+
+.metric-block__label,
+.metric-block__subvalue {
+  line-height: 1.25;
+}
+
+.metric-block__value {
+  line-height: 1.05;
+}
+
+.live-secondary div,
+.performance-summary div {
+  padding: 13px 16px;
+}
+
+.pp-stats div {
+  min-height: 36px;
+  padding: 7px 0;
+  border-width: 0 0 1px;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.pp-stats__total {
+  margin-top: 8px;
+  padding: 10px 12px !important;
+  border: 1px solid rgba(255, 255, 255, 0.11) !important;
+  border-radius: 14px !important;
+  background: rgba(255, 255, 255, 0.045) !important;
+}
+
+.breakdown-item {
+  padding: 12px 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.breakdown-item__head {
+  gap: 12px;
+}
+
+.breakdown-item__head > span,
+.breakdown-item__head > div {
+  min-width: 0;
+}
+
+.breakdown-item__track {
+  margin-top: 8px;
+}
+
+.chart-panel,
+.map-graph {
+  min-height: 150px;
+  padding: 12px;
+  background: rgba(18, 22, 30, 0.82);
+}
+
+.map-graph__scale {
+  left: auto;
+  top: 12px;
+  right: 14px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(18, 22, 30, 0.74);
+  color: #c9d2df;
+  font-size: 0.76rem;
+  line-height: 1.2;
+}
+
+.map-graph__axis {
+  color: #8f99a8;
+}
+
+.recent-play-card,
+.metric-block,
+.live-secondary div,
+.performance-summary div,
+.recent-play-details__grid div,
+.pp-stats div,
+.breakdown-item,
+.map-graph,
+.chart-panel,
+.plays-table__head,
+.plays-table__row {
+  backdrop-filter: none;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.13),
+    0 8px 20px rgba(0, 0, 0, 0.16);
+}
+
+.recent-play-card {
+  cursor: default;
+  contain: content;
+  transition: none;
+}
+
+.recent-play-card:hover,
+.recent-play-card:focus-visible {
+  border-color: var(--glass-border) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.13),
+    0 8px 20px rgba(0, 0, 0, 0.16) !important;
+  outline: none;
+  transform: none;
+}
+
+.plays-table__head,
+.plays-table__row {
+  margin: 0;
+  border-radius: 0;
+  border-bottom-color: rgba(255, 255, 255, 0.075);
+  contain: paint;
+  transition:
+    background 260ms ease,
+    color 220ms ease,
+    border-color 260ms ease;
+}
+
+.plays-table__head {
+  margin-top: 0;
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.plays-table__row:hover {
+  background: transparent;
+}
+
+.metric-block__label,
+.live-secondary span,
+.performance-summary span,
+.pp-panel__hero span,
+.breakdown-item__head,
+.breakdown-item__head > div {
+  color: var(--glass-muted);
+}
+
+.metric-block__value,
+.performance-summary strong,
+.pp-panel__hero strong {
+  color: var(--glass-text);
+}
+
+.chart-svg__grid,
+.map-graph__grid {
+  stroke: rgba(255, 255, 255, 0.08);
+}
+
+.chart-svg__line,
+.map-graph__line,
+.breakdown-item__fill,
+.performance-track__fill,
+.recent-play-card__bar div {
+  background: linear-gradient(90deg, var(--glass-accent), var(--glass-accent-2));
+  stroke: var(--glass-accent);
+}
+
+.breakdown-item__track,
+.performance-track__rail,
+.recent-play-card__bar {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.035)),
+    rgba(255, 255, 255, 0.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.22);
+}
+
+.link-button,
+.recent-expand-button,
+.toggle-button,
+.reset-button,
+.hotkey-capture-button,
+.overlay-preset,
+.overlay-editor-actions button,
+.metric-toggle,
+.window-button,
+.sidebar__item,
+.overlay-editor-tab {
+  border: 1px solid var(--glass-border);
+  background:
+    radial-gradient(circle at 28% 0%, rgba(255, 255, 255, 0.085), transparent 44%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.04)),
+    rgba(255, 255, 255, 0.035);
+  color: var(--glass-text);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 8px 20px rgba(0, 0, 0, 0.16);
+  backdrop-filter: none;
+  transform-origin: center;
+  transition:
+    border-color 320ms ease,
+    background 320ms ease,
+    box-shadow 320ms ease,
+    color 260ms ease,
+    transform 300ms cubic-bezier(0.2, 1.08, 0.22, 1),
+    filter 320ms ease;
+}
+
+.link-button:hover,
+.recent-expand-button:hover,
+.toggle-button:hover,
+.reset-button:hover,
+.hotkey-capture-button:hover,
+.overlay-preset:hover,
+.overlay-editor-actions button:hover,
+.metric-toggle:hover,
+.window-button:hover,
+.sidebar__item:hover,
+.overlay-editor-tab:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+  background:
+    radial-gradient(circle at 30% 0%, rgba(255, 255, 255, 0.13), transparent 42%),
+    radial-gradient(circle at 28% 0%, rgba(255, 255, 255, 0.14), transparent 44%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.052)),
+    rgba(255, 255, 255, 0.045);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    0 10px 24px rgba(0, 0, 0, 0.18);
+  color: #fff;
+  transform: translateY(-1px) scale(1.012);
+  filter: saturate(1.08);
+}
+
+.link-button:active,
+.recent-expand-button:active,
+.toggle-button:active,
+.reset-button:active,
+.hotkey-capture-button:active,
+.overlay-preset:active,
+.overlay-editor-actions button:active,
+.metric-toggle:active,
+.window-button:active,
+.sidebar__item:active,
+.overlay-editor-tab:active {
+  transform: translateY(1px) scale(0.98);
+  filter: brightness(0.98) saturate(1.12);
+}
+
+.link-button:focus-visible,
+.recent-expand-button:focus-visible,
+.toggle-button:focus-visible,
+.reset-button:focus-visible,
+.hotkey-capture-button:focus-visible,
+.overlay-preset:focus-visible,
+.overlay-editor-actions button:focus-visible,
+.metric-toggle:focus-visible,
+.window-button:focus-visible,
+.sidebar__item:focus-visible,
+.overlay-editor-tab:focus-visible {
+  outline: 2px solid rgba(120, 168, 255, 0.42);
+  outline-offset: 2px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 0 0 5px rgba(120, 168, 255, 0.1),
+    0 12px 28px rgba(0, 0, 0, 0.2);
+}
+
+.toggle-button--active,
+.hotkey-capture-button--active,
+.overlay-editor-actions__primary,
+.metric-toggle--active {
+  border-color: rgba(255, 94, 170, 0.4) !important;
+  background:
+    radial-gradient(circle at 28% 0%, rgba(255, 255, 255, 0.22), transparent 42%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.16), rgba(255, 94, 170, 0.18)),
+    rgba(255, 94, 170, 0.11) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.2),
+    0 10px 24px rgba(255, 94, 170, 0.1);
+  color: #fff !important;
+}
+
+.reset-button:hover {
+  border-color: rgba(255, 151, 164, 0.36);
+  background:
+    radial-gradient(circle at 28% 0%, rgba(255, 255, 255, 0.13), transparent 44%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.045)),
+    rgba(255, 94, 118, 0.07);
+}
+
+.window-button {
+  border-color: transparent;
+  border-radius: 0;
+  background: transparent !important;
+  background-image: none !important;
+  box-shadow: none;
+  backdrop-filter: none !important;
+  filter: none;
+}
+
+.window-button:hover {
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.055) !important;
+  background-image: none !important;
+  box-shadow: none;
+  transform: none;
+}
+
+.window-button--close:hover {
+  border-color: transparent;
+  background:
+    linear-gradient(180deg, rgba(255, 95, 112, 0.84), rgba(210, 42, 62, 0.82)) !important;
+  color: #fff;
+}
+
+.liquid-segmented .sidebar__item,
+.liquid-segmented .overlay-editor-tab,
+.liquid-segmented .sidebar__item:hover,
+.liquid-segmented .overlay-editor-tab:hover,
+.liquid-segmented .sidebar__item:focus-visible,
+.liquid-segmented .overlay-editor-tab:focus-visible {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.hotkey-capture-button--active:hover,
+.toggle-button--active:hover,
+.overlay-editor-actions__primary:hover,
+.metric-toggle--active:hover {
+  border-color: rgba(255, 115, 184, 0.5) !important;
+  background:
+    radial-gradient(circle at 28% 0%, rgba(255, 255, 255, 0.24), transparent 42%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.18), rgba(255, 94, 170, 0.2)),
+    rgba(255, 94, 170, 0.13) !important;
+}
+
+.overlay-preset-list,
+.overlay-editor-actions {
+  padding: 4px;
+  border: 1px solid var(--glass-border);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.035);
+  box-shadow: var(--glass-inner);
+}
+
+.overlay-preset {
+  border-radius: 12px;
+  position: relative;
+  overflow: hidden;
+  transition:
+    border-color 300ms ease,
+    background 300ms ease,
+    box-shadow 300ms ease,
+    transform 360ms cubic-bezier(0.18, 1.28, 0.22, 1),
+    filter 300ms ease;
+}
+
+.overlay-preset::before {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  border-radius: inherit;
+  background:
+    linear-gradient(115deg, transparent, rgba(255, 255, 255, 0.11), transparent),
+    radial-gradient(circle at 22% 0%, rgba(255, 255, 255, 0.11), transparent 44%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 260ms ease;
+}
+
+.overlay-preset:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    0 10px 24px rgba(0, 0, 0, 0.2);
+}
+
+.overlay-preset:hover::before {
+  opacity: 1;
+}
+
+.number-field input,
+.overlay-editor-fields input {
+  border-color: rgba(255, 255, 255, 0.13);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.035)),
+    rgba(7, 9, 14, 0.35);
+  color: var(--glass-text);
+}
+
+input[type='range'] {
+  appearance: none;
+  height: 30px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  filter: saturate(1.08);
+  transition: filter 260ms ease;
+}
+
+input[type='range']::-webkit-slider-runnable-track {
+  height: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 999px;
+  background:
+    linear-gradient(90deg, rgba(255, 94, 170, 0.82), rgba(120, 168, 255, 0.78)),
+    rgba(255, 255, 255, 0.08);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.24);
+  transition:
+    background 300ms ease,
+    box-shadow 300ms ease,
+    filter 300ms ease;
+}
+
+input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  width: 24px;
+  height: 24px;
+  margin-top: -8px;
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 34% 26%, rgba(255, 255, 255, 0.94), rgba(255, 255, 255, 0.18) 30%, transparent 42%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.38), rgba(255, 94, 170, 0.34)),
+    rgba(32, 35, 44, 0.94);
+  box-shadow:
+    0 8px 18px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.45);
+  transition:
+    transform 320ms cubic-bezier(0.18, 1.35, 0.22, 1),
+    box-shadow 260ms ease,
+    filter 260ms ease;
+}
+
+input[type='range']:hover::-webkit-slider-thumb,
+input[type='range']:focus-visible::-webkit-slider-thumb {
+  transform: scale(1.12, 0.94);
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.42),
+    0 0 0 5px rgba(255, 94, 170, 0.13),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+input[type='range']:active::-webkit-slider-thumb {
+  transform: scale(0.92, 1.2);
+  filter: brightness(1.08) saturate(1.18);
+}
+
+.toggle-button,
+.metric-toggle {
+  border-radius: 999px;
+}
+
+.toggle-button--active,
+.metric-toggle--active {
+  transform: scale(1.02);
+}
+
+.statusbar {
+  color: var(--glass-muted);
+}
+
+.pp-panel {
+  padding-left: 30px;
+}
+
+.pp-panel__section {
+  padding: 20px 0 26px;
+}
+
+.breakdown-list {
+  gap: 18px;
+}
+
+.breakdown-item {
+  padding: 12px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.breakdown-item__head {
+  align-items: baseline;
+  gap: 14px;
+}
+
+.breakdown-item__head > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.breakdown-item__head > div {
+  flex: none;
+  gap: 12px;
+}
+
+.breakdown-item__track {
+  margin-top: 9px;
+}
+
+.pp-stats {
+  gap: 0;
+}
+
+.pp-stats div {
+  min-height: 42px;
+  padding: 9px 0;
+  border-width: 0 0 1px;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.pp-stats span {
+  padding-right: 12px;
+}
+
+.pp-stats strong {
+  flex: none;
+}
+
+.pp-stats__total {
+  min-height: 52px;
+  margin-top: 14px;
+  padding: 0 16px !important;
+  align-items: center;
+  border-radius: 16px !important;
+}
+
+.map-graph {
+  height: 158px;
+  min-height: 158px;
+  padding: 14px;
+}
+
+.map-graph__svg {
+  height: calc(100% - 28px);
+}
+
+.map-graph__axis {
+  margin-top: 7px;
+}
+
+.map-graph__scale {
+  left: auto;
+  top: 12px;
+  right: 14px;
+  z-index: 2;
+}
+
 @keyframes panel-in {
   from {
     opacity: 0;
@@ -2698,6 +3862,30 @@
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes liquid-view-in {
+  from {
+    opacity: 0;
+    transform: translateX(10px) scale(0.996);
+    filter: blur(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+@keyframes glass-flow {
+  from {
+    background-position: 0% 20%, center, center;
+  }
+
+  to {
+    background-position: 100% 80%, center, center;
   }
 }
 
@@ -2713,6 +3901,34 @@
     filter: blur(0);
     opacity: 1;
     transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel::before,
+  .recent-play-card::before,
+  .overlay-settings-card::before,
+  .overlay-preview-panel::before,
+  .metric-block::before,
+  .live-secondary div::before,
+  .pp-stats div::before {
+    animation: none;
+  }
+
+  .liquid-segmented__indicator,
+  .link-button,
+  .recent-expand-button,
+  .toggle-button,
+  .reset-button,
+  .hotkey-capture-button,
+  .overlay-preset,
+  .overlay-editor-actions button,
+  .metric-toggle,
+  .window-button,
+  .sidebar__item,
+  .overlay-editor-tab,
+  input[type='range']::-webkit-slider-thumb {
+    transition-duration: 80ms;
   }
 }
 

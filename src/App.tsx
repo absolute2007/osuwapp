@@ -1,12 +1,15 @@
 import {
   type CSSProperties,
   startTransition,
+  useCallback,
   useDeferredValue,
   useEffect,
   useEffectEvent,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
+  type ReactNode,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react'
@@ -15,6 +18,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import '@fontsource-variable/inter/index.css'
 import appIconUrl from './assets/app-icon.png'
+import appLogoUrl from './assets/app-logo.png'
 import './App.css'
 import { initialSnapshot } from './mockSnapshot'
 import type {
@@ -31,6 +35,7 @@ const OPEN_OVERLAY_SETTINGS_EVENT = 'open-overlay-settings'
 const MAX_GRAPH_POINTS = 96
 const integerFormatter = new Intl.NumberFormat('en-US')
 const RECENT_PLAY_LIMIT = 30
+const RECENT_PLAY_COLLAPSED_COUNT = 6
 type OverlayPanelKey = keyof Pick<OverlaySettings, 'ppPanel' | 'statsPanel' | 'hitsPanel' | 'mapPanel'>
 
 const compactOverlayPanels = {
@@ -105,6 +110,20 @@ const SECONDARY_NAV = [
   { id: 'settings', label: 'Settings', icon: SettingsIcon },
   { id: 'about', label: 'About', icon: AboutIcon },
 ] as const
+
+const SIDEBAR_NAV = [
+  ...PRIMARY_NAV,
+  { ...SECONDARY_NAV[0], separatedBefore: true },
+  SECONDARY_NAV[1],
+] as const
+
+type LiquidNavItem<T extends string> = {
+  id: T
+  label: string
+  icon?: () => ReactNode
+  muted?: boolean
+  separatedBefore?: boolean
+}
 
 const isTauriRuntime = () =>
   typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -822,41 +841,25 @@ function App() {
 
       <div className="workspace-shell">
         <aside className="sidebar">
-          <nav className="sidebar__nav" aria-label="Primary">
-            {PRIMARY_NAV.map(({ id, label, icon: Icon }) => (
-              <button
-                key={id}
-                className={`sidebar__item ${activeView === id ? 'sidebar__item--active' : ''}`}
-                type="button"
-                onClick={() => {
-                  setActiveView(id)
-                }}
-              >
-                <span className="sidebar__icon">
-                  <Icon />
-                </span>
+          <LiquidSegmentedGroup
+            activeId={activeView}
+            ariaLabel="Main navigation"
+            className="sidebar__nav"
+            direction="vertical"
+            items={SIDEBAR_NAV}
+            itemClassName="sidebar__item"
+            renderItem={({ icon: Icon, label }) => (
+              <>
+                {Icon ? (
+                  <span className="sidebar__icon">
+                    <Icon />
+                  </span>
+                ) : null}
                 <span>{label}</span>
-              </button>
-            ))}
-          </nav>
-
-          <div className="sidebar__footer-nav">
-            {SECONDARY_NAV.map(({ id, label, icon: Icon }) => (
-              <button
-                key={id}
-                className={`sidebar__item ${activeView === id ? 'sidebar__item--active' : ''}`}
-                type="button"
-                onClick={() => {
-                  setActiveView(id)
-                }}
-              >
-                <span className="sidebar__icon">
-                  <Icon />
-                </span>
-                <span>{label}</span>
-              </button>
-            ))}
-          </div>
+              </>
+            )}
+            onSelect={(id) => setActiveView(id)}
+          />
 
           <div className="sidebar__status-card">
             <div className={`status-dot status-dot--${viewModel.connection.status}`} />
@@ -870,42 +873,44 @@ function App() {
         </aside>
 
         <main className="workspace-main">
-          {activeView === 'session' ? (
-            <SessionView
-              connection={viewModel.connection}
-              coverSrc={coverSrc}
-              mapGraph={mapGraph}
-              mapTimeline={mapTimeline}
-              recentPlays={viewModel.recentPlays}
-              session={session}
-              sessionGraph={sessionGraph}
-              onOpenHistory={() => {
-                setActiveView('recent')
-              }}
-            />
-          ) : null}
+          <div className="workspace-main__view" key={activeView}>
+            {activeView === 'session' ? (
+              <SessionView
+                connection={viewModel.connection}
+                coverSrc={coverSrc}
+                mapGraph={mapGraph}
+                mapTimeline={mapTimeline}
+                recentPlays={viewModel.recentPlays}
+                session={session}
+                sessionGraph={sessionGraph}
+                onOpenHistory={() => {
+                  setActiveView('recent')
+                }}
+              />
+            ) : null}
 
-          {activeView === 'recent' ? (
-            <RecentHistoryView recentPlays={viewModel.recentPlays} />
-          ) : null}
+            {activeView === 'recent' ? (
+              <RecentHistoryView recentPlays={viewModel.recentPlays} />
+            ) : null}
 
-          {activeView === 'overlay' ? (
-            <OverlayView
-              settings={overlaySettings}
-              onUpdateSettings={(nextSettings) => {
-                void persistOverlaySettings(nextSettings)
-              }}
-            />
-          ) : null}
+            {activeView === 'overlay' ? (
+              <OverlayView
+                settings={overlaySettings}
+                onUpdateSettings={(nextSettings) => {
+                  void persistOverlaySettings(nextSettings)
+                }}
+              />
+            ) : null}
 
-          {activeView === 'settings' ? (
-            <SettingsView
-              calculator={session?.pp.calculator ?? 'rosu-pp 4.0.1 · osu!stable scoring'}
-              recentPlayCount={viewModel.recentPlays.length}
-            />
-          ) : null}
+            {activeView === 'settings' ? (
+              <SettingsView
+                calculator={session?.pp.calculator ?? 'rosu-pp 4.0.1 · osu!stable scoring'}
+                recentPlayCount={viewModel.recentPlays.length}
+              />
+            ) : null}
 
-          {activeView === 'about' ? <AboutView /> : null}
+            {activeView === 'about' ? <AboutView /> : null}
+          </div>
         </main>
       </div>
 
@@ -920,7 +925,7 @@ function App() {
 
       <div className="app-intro" aria-hidden="true">
         <div className="app-intro__mark">
-          <AppIcon />
+          <AppLogo />
         </div>
       </div>
     </div>
@@ -1406,24 +1411,19 @@ function OverlayEditorWindowPage({
       </section>
 
       <aside className="overlay-editor-side">
-        <div className="overlay-editor-tabs">
-          {elementButtons.map((item) => (
-            <button
-              className={[
-                'overlay-editor-tab',
-                selectedElement === item.key ? 'overlay-editor-tab--active' : '',
-                isPanelVisible(draft, item.key) ? '' : 'overlay-editor-tab--muted',
-              ]
-                .filter(Boolean)
-                .join(' ')}
-              key={item.key}
-              type="button"
-              onClick={() => setSelectedElement(item.key)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
+        <LiquidSegmentedGroup
+          activeId={selectedElement}
+          ariaLabel="Overlay element"
+          className="overlay-editor-tabs"
+          itemClassName="overlay-editor-tab"
+          items={elementButtons.map((item) => ({
+            id: item.key,
+            label: item.label,
+            muted: !isPanelVisible(draft, item.key),
+          }))}
+          renderItem={(item) => item.label}
+          onSelect={(id) => setSelectedElement(id)}
+        />
         <div className="overlay-editor-fields">
           <label className="overlay-editor-check overlay-editor-check--wide">
             <input
@@ -1575,6 +1575,263 @@ function EditableOverlayElement({
 
 function AppIcon() {
   return <img alt="" src={appIconUrl} />
+}
+
+function AppLogo() {
+  return <img alt="" src={appLogoUrl} />
+}
+
+function LiquidSegmentedGroup<T extends string>({
+  activeId,
+  ariaLabel,
+  className,
+  direction = 'horizontal',
+  itemClassName,
+  items,
+  renderItem,
+  onSelect,
+}: {
+  activeId: string
+  ariaLabel: string
+  className: string
+  direction?: 'horizontal' | 'vertical'
+  itemClassName: string
+  items: readonly LiquidNavItem<T>[]
+  renderItem: (item: LiquidNavItem<T>) => ReactNode
+  onSelect: (id: T) => void
+}) {
+  const groupRef = useRef<HTMLDivElement | null>(null)
+  const itemRefs = useRef(new Map<T, HTMLButtonElement>())
+  const previewIdRef = useRef<T | null>(null)
+  const dragPositionRef = useRef<number | null>(null)
+  const dragStartPositionRef = useRef<number | null>(null)
+  const hasDraggedRef = useRef(false)
+  const suppressNextClickRef = useRef(false)
+  const snapTargetRef = useRef<T | null>(null)
+  const snapTimeoutRef = useRef<number | null>(null)
+  const [indicator, setIndicator] = useState<CSSProperties>({ opacity: 0 })
+  const [previewId, setPreviewId] = useState<T | null>(null)
+  const [dragging, setDragging] = useState(false)
+  const visibleId = previewId ?? (items.some((item) => item.id === activeId) ? (activeId as T) : null)
+
+  const updatePreviewId = (id: T | null) => {
+    previewIdRef.current = id
+    setPreviewId(id)
+  }
+
+  const clearSnapTimeout = () => {
+    if (snapTimeoutRef.current !== null) {
+      window.clearTimeout(snapTimeoutRef.current)
+      snapTimeoutRef.current = null
+    }
+  }
+
+  const nearestItemFromPointer = (event: ReactPointerEvent<HTMLElement>) => {
+    let nearest = items[0]?.id ?? null
+    let nearestDistance = Number.POSITIVE_INFINITY
+
+    for (const item of items) {
+      const element = itemRefs.current.get(item.id)
+
+      if (!element) {
+        continue
+      }
+
+      const rect = element.getBoundingClientRect()
+      const center = direction === 'vertical'
+        ? rect.top + rect.height / 2
+        : rect.left + rect.width / 2
+      const point = direction === 'vertical' ? event.clientY : event.clientX
+      const distance = Math.abs(point - center)
+
+      if (distance < nearestDistance) {
+        nearest = item.id
+        nearestDistance = distance
+      }
+    }
+
+    return nearest
+  }
+
+  const measureIndicator = useCallback((targetId = visibleId, useDragPosition = true) => {
+    const group = groupRef.current
+    const item = targetId ? itemRefs.current.get(targetId) : null
+
+    if (!group || !item) {
+      setIndicator({ opacity: 0 })
+      return
+    }
+
+    const groupRect = group.getBoundingClientRect()
+    const itemRect = item.getBoundingClientRect()
+    const itemX = itemRect.left - groupRect.left
+    const itemY = itemRect.top - groupRect.top
+    const dragPosition = useDragPosition ? dragPositionRef.current : null
+    const boundedPosition = dragPosition === null
+      ? null
+      : direction === 'vertical'
+        ? Math.min(Math.max(dragPosition - groupRect.top - itemRect.height / 2, 4), groupRect.height - itemRect.height - 4)
+        : Math.min(Math.max(dragPosition - groupRect.left - itemRect.width / 2, 4), groupRect.width - itemRect.width - 4)
+
+    setIndicator({
+      opacity: 1,
+      transform: direction === 'vertical'
+        ? `translate3d(${itemX}px, ${boundedPosition ?? itemY}px, 0)`
+        : `translate3d(${boundedPosition ?? itemX}px, ${itemY}px, 0)`,
+      width: `${itemRect.width}px`,
+      height: `${itemRect.height}px`,
+    })
+  }, [direction, visibleId])
+
+  useLayoutEffect(() => {
+    measureIndicator(snapTargetRef.current ?? undefined, !snapTargetRef.current)
+  }, [dragging, measureIndicator])
+
+  useEffect(() => {
+    const group = groupRef.current
+
+    if (!group) {
+      return
+    }
+
+    const observer = new ResizeObserver(() => {
+      requestAnimationFrame(() => measureIndicator())
+    })
+
+    observer.observe(group)
+    for (const item of itemRefs.current.values()) {
+      observer.observe(item)
+    }
+
+    const handleWindowResize = () => measureIndicator()
+    window.addEventListener('resize', handleWindowResize)
+
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', handleWindowResize)
+    }
+  }, [items, measureIndicator])
+
+  useEffect(() => clearSnapTimeout, [])
+
+  return (
+    <div
+      ref={groupRef}
+      aria-label={ariaLabel}
+      className={`${className} liquid-segmented liquid-segmented--${direction} ${dragging ? 'liquid-segmented--dragging' : ''}`}
+      onPointerDown={(event) => {
+        clearSnapTimeout()
+        snapTargetRef.current = null
+        event.currentTarget.setPointerCapture(event.pointerId)
+        const nearest = nearestItemFromPointer(event)
+        const pointerPosition = direction === 'vertical' ? event.clientY : event.clientX
+        dragStartPositionRef.current = pointerPosition
+        dragPositionRef.current = pointerPosition
+        hasDraggedRef.current = false
+        suppressNextClickRef.current = false
+        setDragging(true)
+        updatePreviewId(nearest)
+        requestAnimationFrame(() => measureIndicator())
+      }}
+      onPointerMove={(event) => {
+        if (!dragging) {
+          return
+        }
+
+        const pointerPosition = direction === 'vertical' ? event.clientY : event.clientX
+        dragPositionRef.current = pointerPosition
+        if (dragStartPositionRef.current !== null && Math.abs(pointerPosition - dragStartPositionRef.current) > 4) {
+          hasDraggedRef.current = true
+        }
+        const nearest = nearestItemFromPointer(event)
+        updatePreviewId(nearest)
+        measureIndicator(nearest)
+      }}
+      onPointerUp={() => {
+        const snappedId = previewIdRef.current
+        const shouldSnapBeforeCommit = hasDraggedRef.current
+
+        dragPositionRef.current = null
+        dragStartPositionRef.current = null
+        setDragging(false)
+
+        if (!snappedId) {
+          snapTargetRef.current = null
+          updatePreviewId(null)
+          return
+        }
+
+        if (!shouldSnapBeforeCommit) {
+          snapTargetRef.current = null
+          onSelect(snappedId)
+          updatePreviewId(null)
+          return
+        }
+
+        suppressNextClickRef.current = true
+        snapTargetRef.current = snappedId
+        updatePreviewId(snappedId)
+        requestAnimationFrame(() => measureIndicator(snappedId, false))
+        snapTimeoutRef.current = window.setTimeout(() => {
+          onSelect(snappedId)
+          snapTargetRef.current = null
+          updatePreviewId(null)
+          snapTimeoutRef.current = null
+        }, 180)
+      }}
+      onPointerCancel={() => {
+        clearSnapTimeout()
+        snapTargetRef.current = null
+        dragPositionRef.current = null
+        dragStartPositionRef.current = null
+        hasDraggedRef.current = false
+        setDragging(false)
+        updatePreviewId(null)
+      }}
+      role="tablist"
+    >
+      <span className="liquid-segmented__indicator" style={indicator} />
+      {items.map((item) => {
+        const isActive = activeId === item.id
+        return (
+          <button
+            ref={(element) => {
+              if (element) {
+                itemRefs.current.set(item.id, element)
+              } else {
+                itemRefs.current.delete(item.id)
+              }
+            }}
+            aria-selected={isActive}
+            className={[
+              itemClassName,
+              isActive ? `${itemClassName}--active` : '',
+              item.muted ? `${itemClassName}--muted` : '',
+              item.separatedBefore ? `${itemClassName}--separated-before` : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+            key={item.id}
+            role="tab"
+            type="button"
+            onClick={(event) => {
+              if (suppressNextClickRef.current) {
+                event.preventDefault()
+                suppressNextClickRef.current = false
+                return
+              }
+
+              clearSnapTimeout()
+              snapTargetRef.current = null
+              onSelect(item.id)
+            }}
+          >
+            {renderItem(item)}
+          </button>
+        )
+      })}
+    </div>
+  )
 }
 
 function SessionView({
@@ -1923,7 +2180,14 @@ function PerformanceTimeline({
     firstSliderBreak ? { label: 'Slider break', sample: firstSliderBreak, tone: 'warn' } : null,
     firstMiss ? { label: 'Miss', sample: firstMiss, tone: 'danger' } : null,
     accuracyDrop ? { label: 'Acc drop', sample: accuracyDrop, tone: 'blue' } : null,
-  ].filter(Boolean) as Array<{ label: string; sample: PerformanceSample; tone: string }>
+  ]
+    .filter(Boolean)
+    .filter((event, index, events) => {
+      const current = event as { sample: PerformanceSample }
+      return !events
+        .slice(0, index)
+        .some((previous) => Math.abs(((previous as { sample: PerformanceSample }).sample.progress - current.sample.progress) * 100) < 7)
+    }) as Array<{ label: string; sample: PerformanceSample; tone: string }>
 
   return (
     <section className="performance-timeline">
@@ -1984,6 +2248,11 @@ function RecentPlaysCard({
   recentPlays: RecentPlaySnapshot[]
   onOpenHistory: () => void
 }) {
+  const visibleRecentPlays = useMemo(
+    () => recentPlays.slice(0, RECENT_PLAY_COLLAPSED_COUNT),
+    [recentPlays],
+  )
+
   return (
     <section className="panel">
       <div className="panel__title panel__title--split">
@@ -1994,7 +2263,7 @@ function RecentPlaysCard({
       </div>
 
       <PlaysTable
-        recentPlays={recentPlays}
+        recentPlays={visibleRecentPlays}
         emptyLabel="Completed plays will appear here and stay saved between launches."
       />
     </section>
@@ -2110,6 +2379,17 @@ function LivePpPanel({
 
 function RecentHistoryView({ recentPlays }: { recentPlays: RecentPlaySnapshot[] }) {
   const [coverImages, setCoverImages] = useState<Record<string, string>>({})
+  const [showAllRecentPlays, setShowAllRecentPlays] = useState(false)
+  const requestedCoverPathsRef = useRef(new Set<string>())
+  const hasHiddenRecentPlays = recentPlays.length > RECENT_PLAY_COLLAPSED_COUNT
+  const featuredRecentPlays = useMemo(
+    () => recentPlays.slice(0, RECENT_PLAY_COLLAPSED_COUNT),
+    [recentPlays],
+  )
+  const visibleTablePlays = useMemo(
+    () => (showAllRecentPlays ? recentPlays : recentPlays.slice(0, RECENT_PLAY_COLLAPSED_COUNT)),
+    [recentPlays, showAllRecentPlays],
+  )
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -2118,14 +2398,18 @@ function RecentHistoryView({ recentPlays }: { recentPlays: RecentPlaySnapshot[] 
 
     const paths = Array.from(
       new Set(
-        recentPlays
+        featuredRecentPlays
           .map((play) => play.coverPath)
-          .filter((path): path is string => Boolean(path && !Object.prototype.hasOwnProperty.call(coverImages, path))),
+          .filter((path): path is string => Boolean(path && !requestedCoverPathsRef.current.has(path))),
       ),
     )
 
     if (paths.length === 0) {
       return
+    }
+
+    for (const path of paths) {
+      requestedCoverPathsRef.current.add(path)
     }
 
     let cancelled = false
@@ -2160,7 +2444,7 @@ function RecentHistoryView({ recentPlays }: { recentPlays: RecentPlaySnapshot[] 
     return () => {
       cancelled = true
     }
-  }, [coverImages, recentPlays])
+  }, [featuredRecentPlays])
 
   return (
     <section className="page-shell page-shell--single">
@@ -2168,12 +2452,29 @@ function RecentHistoryView({ recentPlays }: { recentPlays: RecentPlaySnapshot[] 
         <h1>Recent Plays</h1>
       </header>
 
-      <RecentPlayCards coverImages={coverImages} recentPlays={recentPlays} />
+      <RecentPlayCards
+        coverImages={coverImages}
+        recentPlays={featuredRecentPlays}
+      />
+
+      {hasHiddenRecentPlays ? (
+        <button
+          className="recent-expand-button"
+          type="button"
+          onClick={() => {
+            startTransition(() => {
+              setShowAllRecentPlays((current) => !current)
+            })
+          }}
+        >
+          {showAllRecentPlays ? 'Show first 6' : `Show ${recentPlays.length - RECENT_PLAY_COLLAPSED_COUNT} more`}
+        </button>
+      ) : null}
 
       <section className="panel">
         <div className="panel__title">Saved History</div>
         <PlaysTable
-          recentPlays={recentPlays}
+          recentPlays={visibleTablePlays}
           emptyLabel="No completed plays have been captured yet."
         />
       </section>
@@ -2202,7 +2503,10 @@ function RecentPlayCards({
         const coverSrc = play.coverPath ? coverImages[play.coverPath] : null
 
         return (
-          <article className="recent-play-card" key={`card-${play.timestampMs}-${play.title}-${play.pp}`}>
+          <article
+            className="recent-play-card"
+            key={`card-${play.timestampMs}-${play.title}-${play.pp}`}
+          >
             <div className={`recent-play-card__cover recent-play-card__cover--${tone}`}>
               {coverSrc ? <img src={coverSrc} alt="" /> : null}
             </div>
