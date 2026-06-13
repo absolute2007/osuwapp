@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Osuwapp - desktop companion для osu!stable с live PP, историей последних игр и настраиваемым in-game overlay."
+    />
+    <meta property="og:title" content="Osuwapp" />
+    <meta
+      property="og:description"
+      content="Live PP tracking, recent plays и настраиваемый overlay для osu!stable."
+    />
+    <meta property="og:image" content="./osuwapp-session.png" />
+    <title>Osuwapp</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0f1117;
+        --surface: #151923;
+        --surface-strong: #1b2130;
+        --line: #293244;
+        --text: #f5f7fb;
+        --muted: #9aa7bc;
+        --soft: #c6d0e2;
+        --accent: #ff4fab;
+        --accent-strong: #ff78c1;
+        --blue: #75a3ff;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at 80% 0%, rgba(117, 163, 255, 0.18), transparent 32rem),
+          linear-gradient(180deg, #11141c 0%, var(--bg) 42rem);
+        color: var(--text);
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      img {
+        display: block;
+        max-width: 100%;
+      }
+
+      .site-header {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        border-bottom: 1px solid rgba(198, 208, 226, 0.12);
+        background: rgba(15, 17, 23, 0.78);
+        backdrop-filter: blur(16px);
+      }
+
+      .site-header__inner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        width: min(1160px, calc(100% - 32px));
+        min-height: 68px;
+        margin: 0 auto;
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.75rem;
+        font-weight: 800;
+      }
+
+      .brand img {
+        width: 34px;
+        height: 34px;
+        border-radius: 9px;
+      }
+
+      .nav {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        color: var(--soft);
+        font-size: 0.95rem;
+      }
+
+      .nav a:hover {
+        color: var(--text);
+      }
+
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 44px;
+        padding: 0 1rem;
+        border: 1px solid rgba(255, 79, 171, 0.52);
+        border-radius: 8px;
+        background: var(--accent);
+        color: #160811;
+        font-weight: 800;
+        box-shadow: 0 10px 30px rgba(255, 79, 171, 0.2);
+        transition: transform 160ms ease, background 160ms ease, border-color 160ms ease;
+      }
+
+      .button:hover {
+        transform: translateY(-1px);
+        background: var(--accent-strong);
+      }
+
+      .button--ghost {
+        background: transparent;
+        color: var(--text);
+        border-color: rgba(198, 208, 226, 0.28);
+        box-shadow: none;
+      }
+
+      main {
+        overflow: hidden;
+      }
+
+      .hero {
+        padding: 72px 0 44px;
+      }
+
+      .hero__inner,
+      .section {
+        width: min(1160px, calc(100% - 32px));
+        margin: 0 auto;
+      }
+
+      .hero__grid {
+        display: grid;
+        grid-template-columns: minmax(0, 0.88fr) minmax(360px, 1.12fr);
+        align-items: center;
+        gap: 44px;
+      }
+
+      .eyebrow {
+        margin: 0 0 0.9rem;
+        color: var(--accent-strong);
+        font-size: 0.84rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        max-width: 620px;
+        margin-bottom: 1rem;
+        font-size: clamp(3rem, 8vw, 6.5rem);
+        line-height: 0.95;
+        letter-spacing: 0;
+      }
+
+      .lead {
+        max-width: 600px;
+        margin-bottom: 1.7rem;
+        color: var(--soft);
+        font-size: clamp(1.05rem, 2vw, 1.26rem);
+        line-height: 1.58;
+      }
+
+      .hero__actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+      }
+
+      .hero__meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+        margin-top: 1.35rem;
+        color: var(--muted);
+        font-size: 0.94rem;
+      }
+
+      .hero__meta span {
+        padding: 0.45rem 0.7rem;
+        border: 1px solid rgba(198, 208, 226, 0.16);
+        border-radius: 999px;
+        background: rgba(21, 25, 35, 0.72);
+      }
+
+      .hero__visual {
+        transform: translateY(0);
+        animation: visual-enter 700ms ease both;
+      }
+
+      .screenshot-frame {
+        overflow: hidden;
+        border: 1px solid rgba(198, 208, 226, 0.16);
+        border-radius: 12px;
+        background: #11141c;
+        box-shadow: 0 28px 70px rgba(0, 0, 0, 0.36);
+      }
+
+      .screenshot-frame img {
+        width: 100%;
+      }
+
+      .section {
+        padding: 64px 0;
+      }
+
+      .section__head {
+        display: flex;
+        justify-content: space-between;
+        gap: 2rem;
+        margin-bottom: 28px;
+      }
+
+      .section__head h2 {
+        margin-bottom: 0;
+        font-size: clamp(1.8rem, 4vw, 3rem);
+        line-height: 1.05;
+      }
+
+      .section__head p {
+        max-width: 430px;
+        margin-bottom: 0;
+        color: var(--muted);
+        line-height: 1.58;
+      }
+
+      .feature-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+      }
+
+      .feature {
+        min-height: 172px;
+        padding: 24px 22px;
+        border-right: 1px solid var(--line);
+        background: rgba(21, 25, 35, 0.38);
+      }
+
+      .feature:last-child {
+        border-right: 0;
+      }
+
+      .feature strong {
+        display: block;
+        margin-bottom: 0.65rem;
+        color: var(--text);
+        font-size: 1.05rem;
+      }
+
+      .feature p {
+        margin-bottom: 0;
+        color: var(--muted);
+        line-height: 1.55;
+      }
+
+      .gallery {
+        display: grid;
+        grid-template-columns: 1.28fr 0.72fr;
+        gap: 18px;
+      }
+
+      .gallery figure {
+        margin: 0;
+      }
+
+      .gallery figcaption {
+        margin-top: 0.75rem;
+        color: var(--muted);
+        font-size: 0.94rem;
+      }
+
+      .gallery__stack {
+        display: grid;
+        gap: 18px;
+      }
+
+      .overlay-shot {
+        display: grid;
+        min-height: 250px;
+        place-items: center;
+        border: 1px solid rgba(198, 208, 226, 0.16);
+        border-radius: 12px;
+        background:
+          linear-gradient(45deg, rgba(255, 255, 255, 0.035) 25%, transparent 25%),
+          linear-gradient(-45deg, rgba(255, 255, 255, 0.035) 25%, transparent 25%),
+          linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.035) 75%),
+          linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.035) 75%),
+          #08090d;
+        background-position: 0 0, 0 12px, 12px -12px, -12px 0;
+        background-size: 24px 24px;
+      }
+
+      .overlay-shot img {
+        width: min(520px, 86%);
+        opacity: 0.96;
+      }
+
+      .download {
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        background: rgba(21, 25, 35, 0.5);
+      }
+
+      .download__inner {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        align-items: center;
+        gap: 2rem;
+        width: min(1160px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 42px 0;
+      }
+
+      .download h2 {
+        margin-bottom: 0.5rem;
+        font-size: clamp(1.7rem, 3vw, 2.4rem);
+      }
+
+      .download p {
+        margin-bottom: 0;
+        color: var(--muted);
+      }
+
+      .site-footer {
+        width: min(1160px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 32px 0 42px;
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      @keyframes visual-enter {
+        from {
+          opacity: 0;
+          transform: translateY(18px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          transition: none !important;
+          animation: none !important;
+        }
+      }
+
+      @media (max-width: 900px) {
+        .hero {
+          padding-top: 42px;
+        }
+
+        .hero__grid,
+        .gallery,
+        .download__inner {
+          grid-template-columns: 1fr;
+        }
+
+        .feature-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .feature:nth-child(2) {
+          border-right: 0;
+        }
+
+        .feature:nth-child(-n + 2) {
+          border-bottom: 1px solid var(--line);
+        }
+      }
+
+      @media (max-width: 640px) {
+        .site-header__inner {
+          min-height: 60px;
+        }
+
+        .nav a:not(.button) {
+          display: none;
+        }
+
+        .button {
+          width: 100%;
+        }
+
+        .site-header .button {
+          width: auto;
+          min-height: 38px;
+          padding: 0 0.8rem;
+        }
+
+        .hero__actions {
+          display: grid;
+        }
+
+        .section__head {
+          display: block;
+        }
+
+        .section__head h2 {
+          margin-bottom: 0.8rem;
+        }
+
+        .feature-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .feature,
+        .feature:nth-child(2) {
+          border-right: 0;
+        }
+
+        .feature:nth-child(-n + 3) {
+          border-bottom: 1px solid var(--line);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="site-header__inner">
+        <a class="brand" href="#top" aria-label="Osuwapp">
+          <img src="./assets/app-icon.png" alt="" />
+          <span>Osuwapp</span>
+        </a>
+        <nav class="nav" aria-label="Навигация">
+          <a href="#features">Возможности</a>
+          <a href="#screens">Скрины</a>
+          <a class="button" href="https://github.com/absolute2007/osuwapp/releases/latest">Скачать</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero__inner">
+          <div class="hero__grid">
+            <div>
+              <p class="eyebrow">Desktop companion for osu!stable</p>
+              <h1 id="hero-title">Osuwapp</h1>
+              <p class="lead">
+                Небольшое Windows-приложение для отслеживания live PP, выбранной карты,
+                последних игр и настраиваемого overlay поверх osu!stable.
+              </p>
+              <div class="hero__actions">
+                <a class="button" href="https://github.com/absolute2007/osuwapp/releases/latest">
+                  Скачать последнюю версию
+                </a>
+                <a class="button button--ghost" href="https://github.com/absolute2007/osuwapp">
+                  Репозиторий на GitHub
+                </a>
+              </div>
+              <div class="hero__meta" aria-label="Ключевые сведения">
+                <span>Windows</span>
+                <span>osu!stable</span>
+                <span>v0.1.6</span>
+              </div>
+            </div>
+
+            <div class="hero__visual">
+              <figure class="screenshot-frame">
+                <img
+                  src="./osuwapp-session.png"
+                  alt="Главный экран Osuwapp с выбранной картой, PP breakdown и историей последних игр"
+                />
+              </figure>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="features" aria-labelledby="features-title">
+        <div class="section__head">
+          <h2 id="features-title">Что делает приложение</h2>
+          <p>
+            Osuwapp читает данные из osu!.exe, показывает текущий контекст карты и сохраняет
+            историю сессии между запусками.
+          </p>
+        </div>
+
+        <div class="feature-grid">
+          <div class="feature">
+            <strong>Live PP</strong>
+            <p>Текущий PP, accuracy, combo, hit counts и разбор по компонентам.</p>
+          </div>
+          <div class="feature">
+            <strong>Beatmap preview</strong>
+            <p>Предпросмотр PP для выбранной карты в song select с учетом модов.</p>
+          </div>
+          <div class="feature">
+            <strong>Recent plays</strong>
+            <p>Список последних результатов, который сохраняется после закрытия приложения.</p>
+          </div>
+          <div class="feature">
+            <strong>In-game overlay</strong>
+            <p>Настраиваемые блоки PP, статистики, hit counts и текста карты поверх игры.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="screens" aria-labelledby="screens-title">
+        <div class="section__head">
+          <h2 id="screens-title">Скриншоты</h2>
+          <p>Несколько текущих визуальных артефактов проекта: интерфейс, overlay и иконка.</p>
+        </div>
+
+        <div class="gallery">
+          <figure>
+            <div class="screenshot-frame">
+              <img src="./osuwapp-session.png" alt="Session view в Osuwapp" />
+            </div>
+            <figcaption>Session view с выбранной картой, PP breakdown и recent plays.</figcaption>
+          </figure>
+
+          <div class="gallery__stack">
+            <figure>
+              <div class="overlay-shot">
+                <img src="./assets/overlay-frame.png" alt="Пример прозрачного overlay frame" />
+              </div>
+              <figcaption>Overlay runtime использует прозрачный frame поверх игры.</figcaption>
+            </figure>
+
+            <figure>
+              <div class="screenshot-frame">
+                <img src="./assets/icon-comparison.png" alt="Сравнение вариантов иконки Osuwapp" />
+              </div>
+              <figcaption>Иконка приложения в разных размерах.</figcaption>
+            </figure>
+          </div>
+        </div>
+      </section>
+
+      <section class="download" aria-labelledby="download-title">
+        <div class="download__inner">
+          <div>
+            <h2 id="download-title">Скачать актуальную сборку</h2>
+            <p>Кнопка ведет на последний GitHub Release проекта. Для Windows выбирайте установщик из Assets.</p>
+          </div>
+          <a class="button" href="https://github.com/absolute2007/osuwapp/releases/latest">
+            Скачать последнюю версию
+          </a>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      Osuwapp is an independent companion app and is not affiliated with osu! or ppy Pty Ltd.
+    </footer>
+  </body>
+</html>

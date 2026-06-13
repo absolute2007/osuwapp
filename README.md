@@ -2,6 +2,8 @@
 
 Desktop companion for osu!stable with live PP tracking, recent play history, and an in-game configurable overlay.
 
+[Website and latest download](https://absolute2007.github.io/osuwapp/)
+
 ![osu! Companion session view](docs/osuwapp-session.png)
 
 ## Features
